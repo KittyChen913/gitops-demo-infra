@@ -1,0 +1,24 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Kubernetes / Secrets
+kubeconfig
+*.kubeconfig
+*-secret.yaml
+secret.yaml
+secrets/
+
+# Helm
+charts/*/charts/
+charts/*/tmpcharts/
+
+# Logs & temp
+*.log
+*.tmp
