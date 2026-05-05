@@ -1,0 +1,80 @@
+# Root Application (App of Apps)
+#
+# 用途：GitOps 入口點 — 這個 ArgoCD Application 負責管理 gitops-demo-apps
+#       倉庫中 /apps 目錄下的所有子應用程式。
+#
+# 部署方式：
+#   kubectl apply -n argocd -f argocd/bootstrap/root-application.yaml
+#
+# 注意：
+#   - 此 Application 必須在 ArgoCD 安裝完成後才能套用。
+#   - 請將 spec.source.repoURL 替換為你實際的 gitops-demo-apps 倉庫 URL。
+#   - spec.source.targetRevision 可依需求改為特定 branch 或 tag。
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-application
+  namespace: argocd
+  # finalizer 確保刪除 Application 時，ArgoCD 會先清理所有 child resources
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/name: root-application
+    app.kubernetes.io/part-of: gitops-demo
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    # 標記此為 GitOps 的根入口點，避免誤刪
+    gitops-demo/role: "bootstrap-root"
+spec:
+  # ── 目標叢集 ────────────────────────────────────────────────────────────────
+  # https://kubernetes.default.svc 代表 ArgoCD 所在的叢集本身（in-cluster）
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  # ── 來源倉庫 ────────────────────────────────────────────────────────────────
+  # 請將下方 repoURL 替換為你的 gitops-demo-apps 倉庫位址
+  source:
+    repoURL: https://github.com/KittyChen913/gitops-demo-apps.git
+    targetRevision: master  # 可改為 main、release/v1.0 等固定 branch
+    path: apps            # gitops-demo-apps 倉庫中存放子 Application 的目錄
+
+  # ── 同步策略 ────────────────────────────────────────────────────────────────
+  syncPolicy:
+    # automated: 啟用自動同步
+    automated:
+      # prune: 當 Git 中刪除資源時，自動從叢集刪除對應資源
+      prune: true
+      # selfHeal: 當叢集狀態與 Git 不一致時，自動修復
+      selfHeal: true
+      # allowEmpty: 當 /apps 目錄為空時不報錯（適合初始化階段）
+      allowEmpty: false
+    syncOptions:
+      # 讓 ArgoCD 在 Apply 前先建立缺少的 Namespace
+      - CreateNamespace=true
+      # 使用 server-side apply 處理大型 manifest
+      - ServerSideApply=true
+    # 重試策略：同步失敗時自動退避重試
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # ── 健康檢查與比對設定 ───────────────────────────────────────────────────────
+  # ignoreDifferences 用於排除某些預期的 runtime 差異，避免誤報 OutOfSync
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Application
+      jsonPointers:
+        - /status
+
+  # ── 專案歸屬 ────────────────────────────────────────────────────────────────
+  # 使用 default project；如有需要可建立自訂 AppProject 並在此指定
+  project: default
+
+  # ── 修訂紀錄 ────────────────────────────────────────────────────────────────
+  # revisionHistoryLimit 控制保留的同步歷史筆數
+  revisionHistoryLimit: 10
