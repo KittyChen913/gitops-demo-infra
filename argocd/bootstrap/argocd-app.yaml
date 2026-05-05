@@ -1,0 +1,46 @@
+# ArgoCD Self-Managed Application
+#
+# 用途：讓 ArgoCD 管理自己的安裝（self-managed / GitOps bootstrap）
+#       當此 Application 被 apply 後，argocd/install/ 目錄的任何變更
+#       只需 push 到 Git，ArgoCD 就會自動同步。
+#
+# 套用時機：ArgoCD 初次安裝完成後
+#   kubectl apply -n argocd -f argocd/bootstrap/argocd-app.yaml
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd
+  namespace: argocd
+  # finalizer 確保刪除此 Application 前先清理 child resources
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/name: argocd
+    app.kubernetes.io/part-of: gitops-demo
+spec:
+  project: default
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  source:
+    # 請替換為此 infra repo 的實際 URL
+    repoURL: https://github.com/KittyChen913/gitops-demo-infra.git
+    targetRevision: master
+    path: argocd/install    # 指向含有 kustomization.yaml 的目錄
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # ArgoCD 自身 manifest 較大，建議 server-side apply
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
