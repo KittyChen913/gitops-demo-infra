@@ -1,0 +1,66 @@
+# Root Application - Prod (App of Apps)
+#
+# 用途：GitOps 入口點（生產環境）— 管理 gitops-demo-apps
+#       倉庫中 argocd/applications/prod/ 下的所有子應用程式。
+#
+# 部署方式：
+#   kubectl apply -n argocd -f argocd/bootstrap/root-application-prod.yaml
+#
+# 注意：
+#   - 此 Application 必須在 ArgoCD 安裝完成後才能套用。
+#   - 請將 spec.source.repoURL 替換為你實際的 gitops-demo-apps 倉庫 URL。
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-application-prod
+  namespace: argocd
+  # finalizer 確保刪除 Application 時，ArgoCD 會先清理所有 child resources
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/name: root-application-prod
+    app.kubernetes.io/part-of: gitops-demo
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    # 標記此為 GitOps 的根入口點（prod），避免誤刪
+    gitops-demo/role: "bootstrap-root-prod"
+spec:
+  # ── 目標叢集 ────────────────────────────────────────────────────────────────
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  # ── 來源倉庫 ────────────────────────────────────────────────────────────────
+  source:
+    repoURL: https://github.com/KittyChen913/gitops-demo-apps.git
+    targetRevision: master
+    path: argocd/applications/prod  # prod 環境的 ArgoCD Application 定義
+
+  # ── 同步策略 ────────────────────────────────────────────────────────────────
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # ── 健康檢查與比對設定 ───────────────────────────────────────────────────────
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Application
+      jsonPointers:
+        - /status
+
+  # ── 專案歸屬 ────────────────────────────────────────────────────────────────
+  project: default
+
+  revisionHistoryLimit: 10

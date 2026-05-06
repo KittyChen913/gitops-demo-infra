@@ -1,10 +1,10 @@
-# Root Application (App of Apps)
+# Root Application - Dev (App of Apps)
 #
-# 用途：GitOps 入口點 — 這個 ArgoCD Application 負責管理 gitops-demo-apps
-#       倉庫中 /apps 目錄下的所有子應用程式。
+# 用途：GitOps 入口點（開發環境）— 管理 gitops-demo-apps
+#       倉庫中 argocd/applications/dev/ 下的所有子應用程式。
 #
 # 部署方式：
-#   kubectl apply -n argocd -f argocd/bootstrap/root-application.yaml
+#   kubectl apply -n argocd -f argocd/bootstrap/root-application-dev.yaml
 #
 # 注意：
 #   - 此 Application 必須在 ArgoCD 安裝完成後才能套用。
@@ -14,18 +14,18 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: root-application
+  name: root-application-dev
   namespace: argocd
   # finalizer 確保刪除 Application 時，ArgoCD 會先清理所有 child resources
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   labels:
-    app.kubernetes.io/name: root-application
+    app.kubernetes.io/name: root-application-dev
     app.kubernetes.io/part-of: gitops-demo
     app.kubernetes.io/managed-by: argocd
   annotations:
-    # 標記此為 GitOps 的根入口點，避免誤刪
-    gitops-demo/role: "bootstrap-root"
+    # 標記此為 GitOps 的根入口點（dev），避免誤刪
+    gitops-demo/role: "bootstrap-root-dev"
 spec:
   # ── 目標叢集 ────────────────────────────────────────────────────────────────
   # https://kubernetes.default.svc 代表 ArgoCD 所在的叢集本身（in-cluster）
@@ -38,7 +38,7 @@ spec:
   source:
     repoURL: https://github.com/KittyChen913/gitops-demo-apps.git
     targetRevision: master  # 可改為 main、release/v1.0 等固定 branch
-    path: apps            # gitops-demo-apps 倉庫中存放子 Application 的目錄
+    path: argocd/applications/dev  # dev 環境的 ArgoCD Application 定義
 
   # ── 同步策略 ────────────────────────────────────────────────────────────────
   syncPolicy:
