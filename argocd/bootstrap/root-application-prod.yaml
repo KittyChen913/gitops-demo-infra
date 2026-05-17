@@ -1,7 +1,7 @@
 # Root Application - Prod (App of Apps)
 #
 # 用途：GitOps 入口點（生產環境）— 管理 gitops-demo-apps
-#       倉庫中 argocd/applications/prod/ 下的所有子應用程式。
+#       倉庫中 argocd/applicationsets/gitops-demo-prod.yaml 定義的 ApplicationSet。
 #
 # 部署方式：
 #   kubectl apply -n argocd -f argocd/bootstrap/root-application-prod.yaml
@@ -35,7 +35,9 @@ spec:
   source:
     repoURL: https://github.com/KittyChen913/gitops-demo-apps.git
     targetRevision: master
-    path: argocd/applications/prod  # prod 環境的 ArgoCD Application 定義
+    path: argocd/applicationsets  # prod 環境的 ArgoCD ApplicationSet 定義
+    directory:
+      include: "gitops-demo-prod.yaml"  # 只套用 prod ApplicationSet，排除 dev
 
   # ── 同步策略 ────────────────────────────────────────────────────────────────
   syncPolicy:

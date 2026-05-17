@@ -1,7 +1,7 @@
 # Root Application - Dev (App of Apps)
 #
 # 用途：GitOps 入口點（開發環境）— 管理 gitops-demo-apps
-#       倉庫中 argocd/applications/dev/ 下的所有子應用程式。
+#       倉庫中 argocd/applicationsets/gitops-demo-dev.yaml 定義的 ApplicationSet。
 #
 # 部署方式：
 #   kubectl apply -n argocd -f argocd/bootstrap/root-application-dev.yaml
@@ -38,7 +38,9 @@ spec:
   source:
     repoURL: https://github.com/KittyChen913/gitops-demo-apps.git
     targetRevision: master  # 可改為 main、release/v1.0 等固定 branch
-    path: argocd/applications/dev  # dev 環境的 ArgoCD Application 定義
+    path: argocd/applicationsets  # dev 環境的 ArgoCD ApplicationSet 定義
+    directory:
+      include: "gitops-demo-dev.yaml"  # 只套用 dev ApplicationSet，排除 prod
 
   # ── 同步策略 ────────────────────────────────────────────────────────────────
   syncPolicy:
