@@ -4,11 +4,11 @@
 #       倉庫中 argocd/applicationsets/gitops-demo-dev.yaml 定義的 ApplicationSet。
 #
 # 部署方式：
-#   kubectl apply -n argocd -f argocd/bootstrap/root-application-dev.yaml
+#   由 Terraform null_resource.argocd_root_app 自動執行（terraform apply 後自動觸發）。
+#   手動執行：kubectl apply -n argocd -f argocd/bootstrap/root-application-dev.yaml
 #
 # 注意：
 #   - 此 Application 必須在 ArgoCD 安裝完成後才能套用。
-#   - 請將 spec.source.repoURL 替換為你實際的 gitops-demo-apps 倉庫 URL。
 #   - spec.source.targetRevision 可依需求改為特定 branch 或 tag。
 
 apiVersion: argoproj.io/v1alpha1
@@ -28,13 +28,14 @@ metadata:
     gitops-demo/role: "bootstrap-root-dev"
 spec:
   # ── 目標叢集 ────────────────────────────────────────────────────────────────
-  # https://kubernetes.default.svc 代表 ArgoCD 所在的叢集本身（in-cluster）
+  # 指向 dev worker cluster（非 ArgoCD 所在的 management cluster）。
+  # cluster name 對應 Terraform 建立的 ArgoCD Cluster Secret 中的 name 欄位
+  # 即 dev.tfvars 的 worker_cluster_label = "lke-dev-ateam"
   destination:
-    server: https://kubernetes.default.svc
+    name: lke-dev-ateam
     namespace: argocd
 
   # ── 來源倉庫 ────────────────────────────────────────────────────────────────
-  # 請將下方 repoURL 替換為你的 gitops-demo-apps 倉庫位址
   source:
     repoURL: https://github.com/KittyChen913/gitops-demo-apps.git
     targetRevision: master  # 可改為 main、release/v1.0 等固定 branch
