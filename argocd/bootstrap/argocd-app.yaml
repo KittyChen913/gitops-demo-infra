@@ -1,11 +1,12 @@
 # ArgoCD Self-Managed Application
 #
 # 用途：讓 ArgoCD 管理自己的安裝（self-managed / GitOps bootstrap）
-#       當此 Application 被 apply 後，argocd/install/ 目錄的任何變更
-#       只需 push 到 Git，ArgoCD 就會自動同步。
+#       首次由 Terraform bootstrap 安裝 ArgoCD 完成後，套用此檔。
+#       此後 argocd/install/ 目錄的任何變更只需 push 到 Git，
+#       ArgoCD 就會自動同步（包含 argocd-cm patch、resource limits 等）。
 #
-# 套用時機：ArgoCD 初次安裝完成後
-#   kubectl apply -n argocd -f argocd/bootstrap/argocd-app.yaml
+# 套用時機：由 Terraform null_resource.argocd_self_app 自動執行（terraform apply 後自動觸發）。
+#           argocd-app.yaml 內容異動時，Terraform triggers 會重新執行 kubectl apply。
 
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -26,7 +27,6 @@ spec:
     namespace: argocd
 
   source:
-    # 請替換為此 infra repo 的實際 URL
     repoURL: https://github.com/KittyChen913/gitops-demo-infra.git
     targetRevision: master
     path: argocd/install    # 指向含有 kustomization.yaml 的目錄

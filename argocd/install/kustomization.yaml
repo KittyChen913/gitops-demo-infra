@@ -1,6 +1,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+namespace: argocd
+
 # ── 上游官方 manifest（固定版本，避免 stable 浮動指針）──────────────────────
 resources:
   - https://raw.githubusercontent.com/argoproj/argo-cd/v3.3.9/manifests/install.yaml
