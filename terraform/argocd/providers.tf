@@ -16,24 +16,5 @@ provider "kubernetes" {
 # 沿用 SSM 連線資訊，透過 kubeconfig_raw 連線至 Management Cluster，
 # 套用 argocd/install/ 目錄的 Kustomize manifest。
 provider "kustomization" {
-  kubeconfig_raw = yamlencode({
-    apiVersion = "v1"
-    kind       = "Config"
-    clusters = [{
-      name = "mgmt"
-      cluster = {
-        server                     = data.aws_ssm_parameter.api_endpoint.value
-        "certificate-authority-data" = data.aws_ssm_parameter.ca_cert.value
-      }
-    }]
-    users = [{
-      name = "mgmt"
-      user = { token = data.aws_ssm_parameter.token.value }
-    }]
-    contexts = [{
-      name    = "mgmt"
-      context = { cluster = "mgmt", user = "mgmt" }
-    }]
-    "current-context" = "mgmt"
-  })
+  kubeconfig_raw = local.mgmt_kubeconfig_yaml
 }

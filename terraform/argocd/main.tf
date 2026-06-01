@@ -29,6 +29,30 @@ data "aws_ssm_parameter" "worker_token" {
   with_decryption = true
 }
 
+# ── Management Cluster kubeconfig（共用於 kustomization provider 與 local-exec）─
+locals {
+  mgmt_kubeconfig_yaml = yamlencode({
+    apiVersion = "v1"
+    kind       = "Config"
+    clusters = [{
+      name = "mgmt"
+      cluster = {
+        server                       = data.aws_ssm_parameter.api_endpoint.value
+        "certificate-authority-data" = data.aws_ssm_parameter.ca_cert.value
+      }
+    }]
+    users = [{
+      name = "mgmt"
+      user = { token = data.aws_ssm_parameter.token.value }
+    }]
+    contexts = [{
+      name    = "mgmt"
+      context = { cluster = "mgmt", user = "mgmt" }
+    }]
+    "current-context" = "mgmt"
+  })
+}
+
 # ── ArgoCD Namespace ──────────────────────────────────────────────────────────
 # 明確建立 namespace，確保在所有 kustomize 資源前就存在，
 # 避免 kbst provider 平行建立時 ConfigMap 找不到 namespace 的競態問題。
@@ -99,26 +123,7 @@ resource "kubernetes_secret_v1" "argocd_worker_cluster" {
 # triggers：argocd-app.yaml 內容異動時自動重新執行。
 
 resource "local_sensitive_file" "mgmt_kubeconfig" {
-  content = yamlencode({
-    apiVersion = "v1"
-    kind       = "Config"
-    clusters = [{
-      name = "mgmt"
-      cluster = {
-        server                       = data.aws_ssm_parameter.api_endpoint.value
-        "certificate-authority-data" = data.aws_ssm_parameter.ca_cert.value
-      }
-    }]
-    users = [{
-      name = "mgmt"
-      user = { token = data.aws_ssm_parameter.token.value }
-    }]
-    contexts = [{
-      name    = "mgmt"
-      context = { cluster = "mgmt", user = "mgmt" }
-    }]
-    "current-context" = "mgmt"
-  })
+  content         = local.mgmt_kubeconfig_yaml
   filename        = "${path.module}/.bootstrap.kubeconfig"
   file_permission = "0600"
 }
