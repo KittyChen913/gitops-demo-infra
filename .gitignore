@@ -22,3 +22,17 @@ charts/*/tmpcharts/
 # Logs & temp
 *.log
 *.tmp
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.*
+crash.log
+override.tf
+override.tf.json
+.terraform.lock.hcl
+terraform.tfvars
+!*.tfvars.example
+tfplan-*.bin
