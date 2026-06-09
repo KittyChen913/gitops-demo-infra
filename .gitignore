@@ -23,16 +23,28 @@ charts/*/tmpcharts/
 *.log
 *.tmp
 
+# Local environment files
+.env
+.env.*
+!.env.example
+
 # Terraform
 .terraform/
 *.tfstate
 *.tfstate.*
 *.tfplan
 *.tfplan.*
+tfplan.*
 crash.log
+crash.*.log
+
 override.tf
 override.tf.json
-.terraform.lock.hcl
+*_override.tf
+*_override.tf.json
 terraform.tfvars
-!*.tfvars.example
+*.auto.tfvars
+*.auto.tfvars.json
+.terraformrc
+terraform.rc
 tfplan-*.bin
