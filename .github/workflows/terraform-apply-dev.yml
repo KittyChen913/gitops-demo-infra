@@ -40,6 +40,7 @@ on:
       - "terraform/modules/argocd/**"
       - "argocd/**"
       - ".github/workflows/terraform-apply-dev.yml"
+      - ".github/workflows/_bootstrap-backend.yml"
       - ".github/actions/**"
 
   workflow_dispatch:
@@ -89,6 +90,9 @@ jobs:
         working-directory: terraform/argocd/dev
 
     steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
       - name: "Validate OIDC prerequisites"
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -99,9 +103,6 @@ jobs:
             exit 1
           fi
           echo "AWS Account ID configured ✓"
-
-      - name: "Checkout"
-        uses: actions/checkout@v6
 
       # ── 顯示觸發資訊（Audit Log）───────────────────────────────────────────────────
       - name: "Log trigger context"
