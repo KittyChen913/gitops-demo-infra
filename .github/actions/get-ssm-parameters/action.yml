@@ -1,0 +1,51 @@
+name: "Get SSM Parameters"
+description: "Retrieves parameters from AWS SSM Parameter Store and sets them as environment variables"
+
+inputs:
+  ssm_param_path:
+    description: "Path to the SSM Parameter Store"
+    required: true
+
+outputs:
+  env_vars:
+    description: "Formatted environment variables string"
+    value: ${{ steps.get-ssm.outputs.env_vars }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: get-ssm
+      shell: bash
+      env:
+        SSM_PARAM_PATH: ${{ inputs.ssm_param_path }}
+      run: |
+        params=$(aws ssm get-parameters-by-path \
+          --path "${SSM_PARAM_PATH}" \
+          --recursive \
+          --with-decryption \
+          --query "Parameters[*].{Name:Name,Value:Value}" \
+          --output text)
+
+        env_vars=""
+        param_count=0
+        while read -r name value; do
+          if [[ -n "$name" && -n "$value" ]]; then
+            var_name=$(echo "$name" | awk -F'/' '{print $NF}')
+            echo "::add-mask::$value"
+            echo "Found parameter: $var_name"
+            if [[ -z "$env_vars" ]]; then
+              env_vars="$var_name=$value"
+            else
+              env_vars="$env_vars,$var_name=$value"
+            fi
+            param_count=$((param_count + 1))
+          fi
+        done <<< "$params"
+
+        echo "env_vars=$env_vars" >> $GITHUB_OUTPUT
+
+        if [[ -n "$env_vars" ]]; then
+          echo "✓ Successfully retrieved $param_count SSM parameters"
+        else
+          echo "⚠ No SSM parameters found"
+        fi

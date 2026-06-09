@@ -1,0 +1,319 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ArgoCD Bootstrap Verification
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# 觸發方式：
+#   A. workflow_dispatch（手動觸發，可選 environment）
+#   B. 由 terraform-apply.yml 完成 apply 後自動觸發（createWorkflowDispatch）
+#
+# 驗證項目（依序）：
+#   1. Kubernetes API 連通性
+#   2. ArgoCD pods readiness（argocd namespace 至少 4 個 Running pods）
+#   3. ArgoCD API /healthz + /readyz 端點
+#   4. ArgoCD self-managed application（name: argocd）sync/health status
+#   5. Root Application bootstrap（root-application-dev / root-application-prod）
+#   6. Worker cluster 註冊驗證（argocd cluster secret 存在）
+#
+# 安全設計：
+#   - kubeconfig 透過 AWS SSM Parameter Store 動態取得（不儲存於 repo）
+#   - token/CA 在 log 中 mask
+#   - kubeconfig 寫入 mktemp，job 結束後 shred 清除
+#   - 不使用 $GITHUB_WORKSPACE 存放任何 credentials
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "🔎 ArgoCD Bootstrap Verification"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    name: "Verify ArgoCD [${{ inputs.environment }}]"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      # ── AWS OIDC 認證 ─────────────────────────────────────────────────────
+      - name: "Configure AWS Credentials (OIDC)"
+        uses: ./.github/actions/configure-aws-credentials
+        with:
+          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws-region: ap-southeast-1
+
+      # ── 安裝工具 ──────────────────────────────────────────────────────────
+      - name: "Install kubectl"
+        uses: azure/setup-kubectl@v5
+        with:
+          version: "v1.30.0"
+
+      # ── 從 SSM 取得叢集憑證，建立 kubeconfig ─────────────────────────────
+      # 憑證不寫入 GITHUB_WORKSPACE，使用 mktemp 並 chmod 600
+      - name: "Fetch cluster credentials from SSM"
+        id: fetch-creds
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          # 依 environment 決定 SSM 路徑與 cluster labels
+          if [ "${ENVIRONMENT}" = "prod" ]; then
+            SSM_PREFIX="${{ vars.SSM_PREFIX }}"
+            MGMT_LABEL="${{ vars.MGMT_CLUSTER }}"
+            WORKER_LABEL="${{ vars.WORKER_CLUSTER }}"
+          else
+            SSM_PREFIX="${{ vars.SSM_PREFIX }}"
+            MGMT_LABEL="${{ vars.MGMT_CLUSTER }}"
+            WORKER_LABEL="${{ vars.WORKER_CLUSTER }}"
+          fi
+
+          echo "mgmt_label=${MGMT_LABEL}" >> "${GITHUB_OUTPUT}"
+          echo "worker_label=${WORKER_LABEL}" >> "${GITHUB_OUTPUT}"
+
+          echo "Fetching credentials for management cluster: ${MGMT_LABEL}"
+
+          API_ENDPOINT="$(aws ssm get-parameter \
+            --name "${SSM_PREFIX}/${MGMT_LABEL}/api-endpoint" \
+            --query "Parameter.Value" --output text)"
+
+          CA_CERT="$(aws ssm get-parameter \
+            --name "${SSM_PREFIX}/${MGMT_LABEL}/ca-cert" \
+            --query "Parameter.Value" --output text)"
+
+          TOKEN="$(aws ssm get-parameter \
+            --name "${SSM_PREFIX}/${MGMT_LABEL}/token" \
+            --with-decryption \
+            --query "Parameter.Value" --output text)"
+
+          # Mask sensitive values in all subsequent log output
+          echo "::add-mask::${TOKEN}"
+          echo "::add-mask::${CA_CERT}"
+
+          # Write kubeconfig to a temp file with restricted permissions (never in $GITHUB_WORKSPACE)
+          KUBECONFIG_FILE="$(mktemp /tmp/kubeconfig-XXXXXX)"
+          chmod 600 "${KUBECONFIG_FILE}"
+
+          cat > "${KUBECONFIG_FILE}" <<KUBECONFIG_EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - name: mgmt
+            cluster:
+              server: ${API_ENDPOINT}
+              certificate-authority-data: ${CA_CERT}
+          users:
+          - name: mgmt
+            user:
+              token: ${TOKEN}
+          contexts:
+          - name: mgmt
+            context:
+              cluster: mgmt
+              user: mgmt
+          current-context: mgmt
+          KUBECONFIG_EOF
+
+          echo "KUBECONFIG=${KUBECONFIG_FILE}" >> "${GITHUB_ENV}"
+          echo "KUBECONFIG_FILE=${KUBECONFIG_FILE}" >> "${GITHUB_ENV}"
+          echo "API_ENDPOINT=${API_ENDPOINT}" >> "${GITHUB_OUTPUT}"
+          echo "WORKER_LABEL=${WORKER_LABEL}" >> "${GITHUB_OUTPUT}"
+
+      # ── 1. Kubernetes API 連通性 ──────────────────────────────────────────
+      - name: "1 — Kubernetes API connectivity"
+        id: k8s-api
+        run: |
+          echo "=== Kubernetes API Health Check ==="
+          kubectl version --client --output=yaml
+          kubectl cluster-info
+          echo "✅ Kubernetes API endpoint is reachable"
+
+      # ── 2. ArgoCD pods readiness ──────────────────────────────────────────
+      - name: "2 — ArgoCD pods readiness"
+        id: argocd-pods
+        run: |
+          echo "=== ArgoCD Pods Readiness ==="
+
+          for DEPLOY in argocd-server argocd-repo-server argocd-application-controller; do
+            echo "→ Waiting for deployment/${DEPLOY}..."
+            kubectl rollout status deployment/"${DEPLOY}" -n argocd --timeout=5m \
+              || echo "::warning::deployment/${DEPLOY} rollout timed out — checking pod status"
+          done
+
+          echo ""
+          echo "=== Current Pod Status ==="
+          kubectl get pods -n argocd -o wide
+
+          RUNNING="$(kubectl get pods -n argocd --field-selector=status.phase=Running --no-headers | wc -l)"
+          echo "Running pods count: ${RUNNING}"
+
+          if [ "${RUNNING}" -lt 4 ]; then
+            echo "::error::Expected >= 4 running ArgoCD pods, found ${RUNNING}"
+            kubectl describe pods -n argocd | grep -A 10 "Events:" || true
+            exit 1
+          fi
+          echo "✅ ${RUNNING} ArgoCD pods are Running"
+
+      # ── 3. ArgoCD API health/readyz ───────────────────────────────────────
+      - name: "3 — ArgoCD API health endpoints"
+        id: argocd-api
+        run: |
+          echo "=== ArgoCD API Health Check ==="
+
+          # Port-forward argocd-server for API probing
+          kubectl port-forward svc/argocd-server -n argocd 8080:443 &
+          PF_PID=$!
+          echo "PF_PID=${PF_PID}" >> "${GITHUB_ENV}"
+
+          # Wait for port-forward to be ready
+          for _ in $(seq 1 10); do
+            sleep 2
+            if curl -sk --connect-timeout 2 https://localhost:8080/healthz > /dev/null 2>&1; then
+              echo "Port-forward ready after $((i * 2))s"
+              break
+            fi
+          done
+
+          HEALTH="$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8080/healthz)"
+          READY="$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8080/readyz)"
+
+          echo "  /healthz → HTTP ${HEALTH}"
+          echo "  /readyz  → HTTP ${READY}"
+
+          if [ "${HEALTH}" = "200" ]; then
+            echo "✅ ArgoCD API /healthz is healthy"
+          else
+            echo "::error::ArgoCD /healthz returned HTTP ${HEALTH}"
+            exit 1
+          fi
+
+          if [ "${READY}" = "200" ]; then
+            echo "✅ ArgoCD API /readyz is ready"
+          else
+            echo "::warning::ArgoCD /readyz returned HTTP ${READY} (may be warming up)"
+          fi
+
+      # ── 4. ArgoCD self-managed application ───────────────────────────────
+      - name: "4 — ArgoCD self-managed application"
+        id: argocd-self-app
+        run: |
+          echo "=== ArgoCD Self-Managed Application ==="
+
+          if ! kubectl get application argocd -n argocd -o name 2>/dev/null; then
+            echo "::warning::Application 'argocd' not found — self-managed bootstrap may be pending"
+          else
+            SYNC="$(kubectl get application argocd -n argocd \
+              -o jsonpath='{.status.sync.status}' 2>/dev/null || echo 'Unknown')"
+            HEALTH="$(kubectl get application argocd -n argocd \
+              -o jsonpath='{.status.health.status}' 2>/dev/null || echo 'Unknown')"
+
+            echo "  Sync:   ${SYNC}"
+            echo "  Health: ${HEALTH}"
+
+            if [ "${SYNC}" = "Synced" ] && [ "${HEALTH}" = "Healthy" ]; then
+              echo "✅ ArgoCD self-managed application: Synced + Healthy"
+            else
+              echo "::warning::ArgoCD self-app: sync=${SYNC}, health=${HEALTH}"
+            fi
+          fi
+
+      # ── 5. Root Application bootstrap ────────────────────────────────────
+      - name: "5 — Root Application bootstrap"
+        id: root-app
+        run: |
+          echo "=== Root Application Bootstrap Check ==="
+          ROOT_APP="root-application-${{ inputs.environment }}"
+
+          if ! kubectl get application "${ROOT_APP}" -n argocd -o name 2>/dev/null; then
+            echo "::warning::Application '${ROOT_APP}' not found — bootstrap may be in progress"
+            echo ""
+            echo "All applications currently registered in ArgoCD:"
+            kubectl get applications -n argocd --no-headers 2>/dev/null || true
+          else
+            SYNC="$(kubectl get application "${ROOT_APP}" -n argocd \
+              -o jsonpath='{.status.sync.status}' 2>/dev/null || echo 'Unknown')"
+            HEALTH="$(kubectl get application "${ROOT_APP}" -n argocd \
+              -o jsonpath='{.status.health.status}' 2>/dev/null || echo 'Unknown')"
+            SOURCE="$(kubectl get application "${ROOT_APP}" -n argocd \
+              -o jsonpath='{.spec.source.repoURL}' 2>/dev/null || echo 'Unknown')"
+
+            echo "  App:    ${ROOT_APP}"
+            echo "  Sync:   ${SYNC}"
+            echo "  Health: ${HEALTH}"
+            echo "  Source: ${SOURCE}"
+
+            if [ "${SYNC}" = "Synced" ]; then
+              echo "✅ Root Application is Synced"
+            else
+              echo "::warning::Root Application sync=${SYNC}, health=${HEALTH}"
+            fi
+          fi
+
+      # ── 6. Worker cluster registration ───────────────────────────────────
+      - name: "6 — Worker cluster registration"
+        id: cluster-reg
+        run: |
+          echo "=== ArgoCD Cluster Registration Check ==="
+
+          CLUSTER_COUNT="$(kubectl get secrets -n argocd \
+            -l "argocd.argoproj.io/secret-type=cluster" \
+            --no-headers 2>/dev/null | wc -l)"
+
+          echo "  Registered clusters: ${CLUSTER_COUNT}"
+
+          # List cluster names (server URL is base64, skip to avoid decode in log)
+          kubectl get secrets -n argocd \
+            -l "argocd.argoproj.io/secret-type=cluster" \
+            -o custom-columns="NAME:.metadata.name" \
+            --no-headers 2>/dev/null || true
+
+          if [ "${CLUSTER_COUNT}" -ge 1 ]; then
+            echo "✅ ${CLUSTER_COUNT} worker cluster(s) registered in ArgoCD"
+          else
+            echo "::warning::No worker clusters registered — Terraform apply may be pending"
+          fi
+
+      # ── Cleanup ───────────────────────────────────────────────────────────
+      - name: "Cleanup sensitive files"
+        if: always()
+        run: |
+          # Stop port-forward
+          if [ -n "${PF_PID}" ]; then
+            kill "${PF_PID}" 2>/dev/null || true
+          fi
+
+          # Securely wipe kubeconfig
+          if [ -n "${KUBECONFIG_FILE}" ] && [ -f "${KUBECONFIG_FILE}" ]; then
+            shred -u "${KUBECONFIG_FILE}" 2>/dev/null || rm -f "${KUBECONFIG_FILE}"
+            echo "Kubeconfig file securely removed"
+          fi
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      - name: "Write Verification Summary"
+        if: always()
+        run: |
+          {
+            echo "## 🔎 ArgoCD Bootstrap Verification — \`${{ inputs.environment }}\`"
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
+            echo "| 1. Kubernetes API | ${{ steps.k8s-api.outcome }} |"
+            echo "| 2. ArgoCD Pods Readiness | ${{ steps.argocd-pods.outcome }} |"
+            echo "| 3. ArgoCD API Health | ${{ steps.argocd-api.outcome }} |"
+            echo "| 4. Self-Managed Application | ${{ steps.argocd-self-app.outcome }} |"
+            echo "| 5. Root Application Bootstrap | ${{ steps.root-app.outcome }} |"
+            echo "| 6. Cluster Registration | ${{ steps.cluster-reg.outcome }} |"
+            echo ""
+            echo "---"
+            echo "Actor: @${{ github.actor }} · Run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          } >> "${GITHUB_STEP_SUMMARY}"
