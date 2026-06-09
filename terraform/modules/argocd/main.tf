@@ -31,6 +31,8 @@ data "aws_ssm_parameter" "worker_token" {
 
 # ── Management Cluster kubeconfig（共用於 kustomization provider 與 local-exec）─
 locals {
+  manifest_root = abspath("${path.module}/../../../argocd")
+
   mgmt_kubeconfig_yaml = yamlencode({
     apiVersion = "v1"
     kind       = "Config"
@@ -68,7 +70,7 @@ resource "kubernetes_namespace_v1" "argocd" {
 # priority group 1：ClusterRole、ClusterRoleBinding 等 cluster-scoped 資源
 # priority group 2：Deployment、Service 等 namespace-scoped 資源
 data "kustomization_build" "argocd_install" {
-  path = "${path.root}/../../argocd/install"
+  path = "${local.manifest_root}/install"
 }
 
 resource "kustomization_resource" "argocd_p0" {
@@ -98,8 +100,8 @@ resource "kubernetes_secret_v1" "argocd_worker_cluster" {
     name      = "cluster-${var.worker_cluster_label}"
     namespace = var.argocd_namespace
     labels = {
-      "argocd.argoproj.io/secret-type"  = "cluster"
-      "app.kubernetes.io/part-of"        = "gitops-demo"
+      "argocd.argoproj.io/secret-type" = "cluster"
+      "app.kubernetes.io/part-of"      = "gitops-demo"
     }
   }
 
@@ -124,17 +126,17 @@ resource "kubernetes_secret_v1" "argocd_worker_cluster" {
 
 resource "local_sensitive_file" "mgmt_kubeconfig" {
   content         = local.mgmt_kubeconfig_yaml
-  filename        = "${path.module}/.bootstrap.kubeconfig"
+  filename        = "${path.root}/.bootstrap.kubeconfig"
   file_permission = "0600"
 }
 
 resource "null_resource" "argocd_self_app" {
   triggers = {
-    manifest_sha256 = filesha256("${path.root}/../../argocd/bootstrap/argocd-app.yaml")
+    manifest_sha256 = filesha256("${local.manifest_root}/bootstrap/argocd-app.yaml")
   }
 
   provisioner "local-exec" {
-    command = "kubectl apply -n ${var.argocd_namespace} -f \"${abspath("${path.root}/../../argocd/bootstrap/argocd-app.yaml")}\""
+    command = "kubectl apply -n ${var.argocd_namespace} -f \"${local.manifest_root}/bootstrap/argocd-app.yaml\""
     environment = {
       KUBECONFIG = abspath(local_sensitive_file.mgmt_kubeconfig.filename)
     }
@@ -155,11 +157,11 @@ resource "null_resource" "argocd_root_app" {
   for_each = var.root_app_teams
 
   triggers = {
-    manifest_sha256 = filesha256("${path.root}/${each.value}")
+    manifest_sha256 = filesha256("${local.manifest_root}/bootstrap/${each.value}")
   }
 
   provisioner "local-exec" {
-    command = "kubectl apply -n ${var.argocd_namespace} -f \"${abspath("${path.root}/${each.value}")}\""
+    command = "kubectl apply -n ${var.argocd_namespace} -f \"${local.manifest_root}/bootstrap/${each.value}\""
     environment = {
       KUBECONFIG = abspath(local_sensitive_file.mgmt_kubeconfig.filename)
     }

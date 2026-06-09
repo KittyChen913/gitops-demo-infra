@@ -27,7 +27,7 @@ variable "argocd_namespace" {
 }
 
 variable "root_app_teams" {
-  description = "各 team 的 Root Application bootstrap YAML 路徑 map（相對於 terraform/argocd/），key 為 team 名稱"
+  description = "各 team 的 Root Application YAML 路徑 map（相對於 argocd/bootstrap/），key 為 team 名稱"
   type        = map(string)
   default     = {}
 }
