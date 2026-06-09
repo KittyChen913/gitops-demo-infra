@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars (gitignored) and adjust values.
+# CI 環境中，bucket 名稱由 terraform/argocd/<environment>/backend.tf 讀取。
+
+tf_state_bucket = "gitops-demo-tfstate"
+# aws_region    = "ap-southeast-1"   # 預設值，通常不需覆蓋
