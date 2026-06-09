@@ -45,6 +45,9 @@ jobs:
         working-directory: terraform/environments/bootstrap
 
     steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
       # ── 驗證 OIDC 前提條件 ──────────────────────────────────────────────────
       - name: "Validate OIDC prerequisites"
         env:
@@ -56,9 +59,6 @@ jobs:
             exit 1
           fi
           echo "AWS Account ID configured ✓"
-
-      - name: "Checkout"
-        uses: actions/checkout@v6
 
       # ── AWS OIDC 認證 ────────────────────────────────────────────────────────
       # Account ID 來自 Repository Secret
