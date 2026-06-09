@@ -1,0 +1,320 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Terraform Apply — Prod Environment Pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# ⚠️  此 workflow 僅用於 PROD 環境，與 dev 完全隔離。
+#     Dev 環境請見 terraform-apply-dev.yml（push to master trigger）
+#
+# 觸發時機：
+#   push tag 符合語意化版本格式（v*.*.*），例如：
+#   - v1.0.0  ← 首次正式上線
+#   - v1.2.3  ← minor / patch 更新
+#
+# ⛔  禁止事項：
+#   - 此 workflow 不得使用 push: branches trigger
+#   - 不得在 PR / commit push 時自動觸發
+#   - 不得移除 GitHub Environment 的 required reviewer 設定
+#
+# ✅  安全設計：
+#   1. Tag-based trigger → 強制版本審核才能觸發
+#   2. GitHub Environment "prod" → required reviewer 人工核准（必須在 UI 設定）
+#   3. Semantic version tag validation → 格式不符直接 fail
+#   4. 雙重確認：tag pattern check + environment protection rule
+#   5. AWS credentials 透過 OIDC（無 stored key）
+#   6. concurrency lock 防止同時兩個 prod apply 執行
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  TRIGGER DESIGN                                                         │
+# │  push: tags: ["v*.*.*"]  ← prod 只能透過 tag release 觸發                │
+# │  ❌ NO push: branches    ← 嚴禁，防止 accidental prod deploy            │
+# │  ✅ GitHub Environment   ← required reviewer 人工 approval gate         │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# 上線流程：
+#   1. 完成 dev 驗證
+#   2. 建立 release tag：git tag v1.2.3 && git push origin v1.2.3
+#   3. 此 workflow 觸發，等待 GitHub Environment 核准
+#   4. 指定 reviewer 在 GitHub UI 核准部署
+#   5. Terraform apply prod 執行
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "🔴 Terraform Apply [prod] — Tag Release"
+
+on:
+  push:
+    tags:
+      # GitHub Actions tags filter 使用 glob；SemVer 格式由 validate-tag job 嚴格檢查。
+      # 範例：v1.0.0、v1.2.3、v2.0.0
+      - "v*.*.*"
+
+# 最小化 token 權限
+permissions:
+  contents: read
+  id-token: write
+  actions: write   # 觸發 argo-bootstrap-verify workflow
+
+# 同一時間只允許一個 prod apply 執行（排隊，不取消）
+# 確保 prod state 操作的原子性
+concurrency:
+  group: "tf-apply-prod"
+  cancel-in-progress: false
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: Semantic Version Tag Validation
+  # 確保 tag 格式為合法的語意化版本，防止非規範 tag 誤觸發
+  # ────────────────────────────────────────────────────────────────────────────
+  validate-tag:
+    name: "Validate Release Tag"
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - name: "Validate OIDC prerequisites"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          if [ -z "${AWS_ACCOUNT_ID}" ]; then
+            echo "::error title=Missing Secret::AWS_ACCOUNT_ID repository secret is not configured"
+            echo "See README.md → CI/CD Configuration"
+            exit 1
+          fi
+          echo "AWS Account ID configured ✓"
+
+      - name: "Checkout full history"
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: "Parse and validate semantic version tag"
+        id: parse
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "=== Prod Release Tag Validation ==="
+          echo "Raw tag   : ${TAG}"
+          echo "Actor     : ${ACTOR}"
+          echo "Run ID    : ${{ github.run_id }}"
+          echo "Timestamp : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # 嚴格驗證：必須符合 vMAJOR.MINOR.PATCH（純數字）
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid tag format: '${TAG}'"
+            echo "::error::Expected format: v<major>.<minor>.<patch> (e.g. v1.2.3)"
+            exit 1
+          fi
+
+          git fetch --no-tags origin master
+          TAG_COMMIT="$(git rev-list -n 1 "${TAG}^{commit}")"
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/master; then
+            echo "::error::Release tag '${TAG}' does not point to a commit reachable from origin/master"
+            exit 1
+          fi
+          echo "Tag commit is reachable from origin/master: ${TAG_COMMIT}"
+
+          VERSION="${TAG#v}"   # 去除前綴 'v'，輸出 1.2.3
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "✅ Tag valid: ${TAG} (version: ${VERSION})"
+
+      - name: "Write validation summary"
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_VERSION: ${{ steps.parse.outputs.version }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          {
+            echo "## 🔴 Prod Release Trigger"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Tag | \`${TAG_NAME}\` |"
+            echo "| Version | \`${TAG_VERSION}\` |"
+            echo "| Actor | @${ACTOR} |"
+            echo "| Commit SHA | \`${{ github.sha }}\` |"
+            echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo ""
+            echo "> ⏳ Waiting for required reviewer approval in GitHub Environment 'prod'..."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Bootstrap S3 Backend（確保 state bucket 存在）
+  # tag 驗證過後才執行，避免無效 tag 浪費資源
+  # ────────────────────────────────────────────────────────────────────────────
+  bootstrap-backend:
+    name: "Bootstrap S3 Backend"
+    needs: validate-tag
+    uses: ./.github/workflows/_bootstrap-backend.yml
+    with:
+      environment: prod
+    secrets: inherit
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 3: Terraform Apply — Prod
+  #
+  # 此 job 使用 GitHub Environment "prod"，執行前 GitHub 會：
+  #   1. 檢查 required reviewer 設定（必須在 UI 設定，否則此為安全漏洞）
+  #   2. 暂停等待指定 reviewer 核准
+  #   3. 核准後才繼續執行
+  #
+  # ⚠️  UI 設定提醒：
+  #   Settings → Environments → prod → Protection rules
+  #   ✅ Required reviewers（至少 1 人）
+  #   ✅ Deployment branches → Tags matching v*
+  # ────────────────────────────────────────────────────────────────────────────
+  apply:
+    name: "Apply [prod] — ${{ needs.validate-tag.outputs.version }}"
+    needs: [validate-tag, bootstrap-backend]
+    runs-on: ubuntu-latest
+
+    # ⚠️  此設定是 prod 部署的核心安全閘門
+    # GitHub 會在此 job 執行前強制等待 required reviewer 核准
+    # 請確保在 GitHub UI 設定 required reviewers，否則此為 NO-OP
+    environment: prod
+
+    defaults:
+      run:
+        working-directory: terraform/argocd/prod
+
+    steps:
+      - name: "Checkout (tag: ${{ github.ref_name }})"
+        uses: actions/checkout@v6
+        with:
+          # 明確指定 tag ref，確保 apply 的程式碼與觸發 tag 完全對應
+          ref: ${{ github.ref }}
+
+      # ── 顯示觸發資訊（Audit Log）─────────────────────────────────────────
+      - name: "Log prod deployment context"
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "=========================================="
+          echo "  PRODUCTION DEPLOYMENT INITIATED"
+          echo "=========================================="
+          echo "Tag        : ${TAG_NAME}"
+          echo "Version    : ${VERSION}"
+          echo "Actor      : ${ACTOR}"
+          echo "Commit SHA : ${{ github.sha }}"
+          echo "Run ID     : ${{ github.run_id }}"
+          echo "Approved   : (via GitHub Environment protection)"
+          echo "Timestamp  : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "=========================================="
+
+      # ── 安裝 kubectl ──────────────────────────────────────────────────────
+      - name: "Install kubectl"
+        uses: azure/setup-kubectl@v5
+        with:
+          version: "v1.30.0"
+
+      # ── Terraform Setup + AWS OIDC + terraform init ───────────────────────
+      - name: "Terraform Setup (init + AWS auth)"
+        uses: ./.github/actions/tf-setup
+        with:
+          environment: prod
+          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+
+      # ── Pre-apply Plan ────────────────────────────────────────────────────
+      - name: "Terraform Plan (pre-apply)"
+        id: plan
+        run: |
+          set +e
+          terraform plan \
+            -out="${{ runner.temp }}/tfplan.prod" \
+            -no-color \
+            -detailed-exitcode \
+            -input=false \
+            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
+            | tee "${{ runner.temp }}/plan_output.txt"
+          PLAN_EXIT="${PIPESTATUS[0]}"
+          echo "exitcode=${PLAN_EXIT}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${PLAN_EXIT}" -eq 1 ]; then
+            echo "::error::terraform plan failed"
+            exit 1
+          fi
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_write_kubeconfig_files: "false"
+
+      # ── 無變更時跳過 ──────────────────────────────────────────────────────
+      - name: "Skip Apply (no changes)"
+        if: steps.plan.outputs.exitcode == '0'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          echo "✅ No prod infrastructure changes — skipping apply"
+          echo "## ✅ No Changes" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Prod infrastructure is already up-to-date for tag \`${TAG_NAME}\`." >> "${GITHUB_STEP_SUMMARY}"
+
+      # ── Terraform Apply ───────────────────────────────────────────────────
+      - name: "Terraform Apply"
+        id: apply
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            "${{ runner.temp }}/tfplan.prod"
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_write_kubeconfig_files: "false"
+
+      # ── Apply Summary ─────────────────────────────────────────────────────
+      - name: "Write Apply Summary"
+        if: steps.plan.outputs.exitcode == '2' && always()
+        env:
+          APPLY_OUTCOME: ${{ steps.apply.outcome }}
+          TAG_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ "${APPLY_OUTCOME}" = "success" ]; then
+            STATUS_LABEL="✅ Success"
+          else
+            STATUS_LABEL="❌ Failed"
+          fi
+
+          {
+            echo "## 🔴 Terraform Apply — \`prod\`"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`prod\` |"
+            echo "| Release Tag | \`${TAG_NAME}\` |"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Status | ${STATUS_LABEL} |"
+            echo "| Trigger | \`push: tags\` |"
+            echo "| Actor | @${ACTOR} |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo "| Run | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # ── 觸發 ArgoCD Bootstrap 驗證 ───────────────────────────────────────
+      - name: "Trigger ArgoCD Bootstrap Verification"
+        if: steps.apply.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            console.log('Triggering ArgoCD bootstrap verification for prod...');
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              workflow_id: 'argo-bootstrap-verify.yml',
+              ref:   context.ref,
+              inputs: { environment: 'prod' },
+            });
+            console.log('✅ ArgoCD verification dispatched for prod');
+
+      # ── 清理敏感臨時檔案 ──────────────────────────────────────────────────
+      - name: "Cleanup sensitive files"
+        if: always()
+        run: |
+          KUBECONFIG_FILE="$(pwd)/.bootstrap.kubeconfig"
+          if [ -f "${KUBECONFIG_FILE}" ]; then
+            shred -u "${KUBECONFIG_FILE}" 2>/dev/null || rm -f "${KUBECONFIG_FILE}"
+            echo "Cleaned up .bootstrap.kubeconfig"
+          fi

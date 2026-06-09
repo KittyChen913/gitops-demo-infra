@@ -1,0 +1,82 @@
+# Composite Action: Terraform Setup
+#
+# 用途：統一處理所有 Terraform 執行前的準備步驟：
+#   1. Setup Terraform binary
+#   2. AWS OIDC 認證（無需 stored access key）
+#   3. terraform init（S3 remote backend）
+#
+# 被 terraform-plan.yml 與 terraform-apply.yml 呼叫。
+# kubectl 安裝由各 caller 自行負責（apply 需要，plan 不需要）。
+
+name: "Terraform Setup"
+description: "Setup Terraform, authenticate with AWS OIDC, and initialise S3 remote backend"
+
+inputs:
+  environment:
+    description: "Target environment (dev | prod)"
+    required: true
+  aws-account-id:
+    description: "AWS Account ID (stored as Repository Secret secrets.AWS_ACCOUNT_ID)"
+    required: true
+  aws-region:
+    description: "AWS region for authentication"
+    required: false
+    default: "ap-southeast-1"
+  terraform-version:
+    description: "Terraform version constraint"
+    required: false
+    default: "~1.10"
+
+outputs:
+  init-outcome:
+    description: "Outcome of terraform init step"
+    value: ${{ steps.init.outcome }}
+
+runs:
+  using: "composite"
+  steps:
+    # ── 1. Setup Terraform ────────────────────────────────────────────────────
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: true
+
+    # ── 2. AWS OIDC Authentication ────────────────────────────────────────────
+    # 透過 configure-aws-credentials composite action 取得暫時 AWS credentials。
+    # IAM Role 名稱格式：github-oidc-gitops-demo-infra-role
+    # Account ID 儲存為 Repository Secret。
+    - name: Configure AWS Credentials (OIDC)
+      uses: ./.github/actions/configure-aws-credentials
+      with:
+        aws-account-id: ${{ inputs.aws-account-id }}
+        aws-region: ${{ inputs.aws-region }}
+
+    # ── 3. Terraform Init（S3 Backend）────────────────────────────────────────
+    # bucket / region / key / encrypt / use_lockfile 均定義於環境 root 的 backend.tf。
+    # 使用 -reconfigure 確保 CI 每次都重新初始化。
+    - name: Terraform Init
+      id: init
+      shell: bash
+      env:
+        TF_IN_AUTOMATION: "true"
+        TF_ENV: ${{ inputs.environment }}
+      run: |
+        case "${TF_ENV}" in
+          dev|prod) ;;
+          *)
+            echo "::error::Unsupported Terraform environment: ${TF_ENV}"
+            exit 1
+            ;;
+        esac
+
+        TF_ROOT="terraform/argocd/${TF_ENV}"
+
+        if [ ! -f "${TF_ROOT}/backend.tf" ]; then
+          echo "::error::Terraform backend not found: ${TF_ROOT}/backend.tf"
+          exit 1
+        fi
+
+        terraform -chdir="${TF_ROOT}" init \
+          -reconfigure \
+          -input=false

@@ -1,0 +1,279 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Terraform Apply — Manual Override (Emergency Use)
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# ⚠️  此 workflow 為緊急手動入口，正常部署流程請使用：
+#   - Dev  → terraform-apply-dev.yml  （push to master 自動觸發）
+#   - Prod → terraform-apply-prod.yml （push tag v*.*.* 觸發）
+#
+# 此 workflow 僅保留 workflow_dispatch，不接受任何 push trigger。
+# 用途：pipeline 緊急補跑、debug 特定環境
+#
+# 觸發方式：
+#   workflow_dispatch（手動指定 env，prod 需額外確認字串）
+#
+# 流程（每個 environment 獨立）：
+#   1. determine-env    ── 決定要 apply 哪個 environment
+#   2. guard-prod       ── prod apply 必須通過確認字串驗證
+#   3. apply            ── pre-plan → apply（僅在 changes 時）→ summary
+#   4. post-verify      ── 觸發 ArgoCD bootstrap 驗證（apply 後自動執行）
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  TRIGGER DESIGN（此檔案）                                                │
+# │  ❌ NO push: branches   ← 禁用，防止與 dev/prod 專屬 workflow 衝突       │
+# │  ❌ NO push: tags       ← 禁用，prod tag trigger 在 prod workflow       │
+# │  ✅ workflow_dispatch   ← 僅允許手動觸發（緊急使用）                      │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# 關鍵安全設計：
+#   - prod 使用 GitHub Environment 的 required reviewer protection
+#   - prod workflow_dispatch 需輸入 "APPLY-PROD" 確認字串
+#   - concurrency lock 防止同環境雙重 apply
+#   - kubectl 預先安裝（Terraform null_resource local-exec 需要）
+#   - kubeconfig 由 Terraform 的 local_sensitive_file 管理，不直接操作
+#   - AWS credentials 透過 OIDC（無 stored key）
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "🔧 Terraform Apply [manual override]"
+
+on:
+  # ── 僅允許手動觸發 ──────────────────────────────────────────────────────
+  # ❌ 不設定 push trigger（防止與 terraform-apply-dev/prod.yml 重複觸發）
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+      confirm_prod:
+        description: "For PROD only — type 'APPLY-PROD' to confirm"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+  actions: write   # 觸發 argo-bootstrap-verify workflow
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: 決定 apply 目標 environment
+  # ────────────────────────────────────────────────────────────────────────────
+  determine-env:
+    name: "Determine Target Environment"
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.set-envs.outputs.environments }}
+    steps:
+      - name: "Validate OIDC prerequisites"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          if [ -z "${AWS_ACCOUNT_ID}" ]; then
+            echo "::error title=Missing Secret::AWS_ACCOUNT_ID repository secret is not configured"
+            echo "See README.md → CI/CD Configuration"
+            exit 1
+          fi
+          echo "AWS Account ID configured ✓"
+
+      - name: "Resolve target environments"
+        id: set-envs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_ENV: ${{ inputs.environment }}
+        run: |
+          # 此 workflow 僅允許 workflow_dispatch
+          # push trigger 已移至：
+          #   dev  → terraform-apply-dev.yml
+          #   prod → terraform-apply-prod.yml
+          if [ "${EVENT_NAME}" != "workflow_dispatch" ]; then
+            echo "::error::This workflow only accepts workflow_dispatch. Use terraform-apply-dev.yml or terraform-apply-prod.yml for automated triggers."
+            exit 1
+          fi
+          echo "environments=[\"${INPUT_ENV}\"]" >> "${GITHUB_OUTPUT}"
+          echo "Manual dispatch — target: ${INPUT_ENV}"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Production 部署安全護欄
+  # 只在目標為 prod 時執行，驗證確認字串
+  # ────────────────────────────────────────────────────────────────────────────
+  guard-prod:
+    name: "Production Deployment Guard"
+    needs: determine-env
+    runs-on: ubuntu-latest
+    if: contains(needs.determine-env.outputs.environments, '"prod"')
+    steps:
+      - name: "Validate production confirmation string"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CONFIRM_PROD: ${{ inputs.confirm_prod }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ "${EVENT_NAME}" != "workflow_dispatch" ]; then
+            echo "::error::Production apply can only be triggered via workflow_dispatch"
+            exit 1
+          fi
+          if [ "${CONFIRM_PROD}" != "APPLY-PROD" ]; then
+            echo "::error::Production deployment requires confirm_prod='APPLY-PROD'"
+            echo "::error::Received: '${CONFIRM_PROD}'"
+            exit 1
+          fi
+          echo "✅ Production deployment confirmed by @${ACTOR}"
+          echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 3: Terraform Apply（matrix: dev | prod）
+  # ────────────────────────────────────────────────────────────────────────────
+  apply:
+    name: "Apply [${{ matrix.environment }}]"
+    needs: [determine-env, guard-prod]
+    if: |
+      always() &&
+      needs.determine-env.result == 'success' &&
+      (needs.guard-prod.result == 'success' || needs.guard-prod.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJSON(needs.determine-env.outputs.environments) }}
+      max-parallel: 1    # dev 與 prod 不可並行，避免 state 競態
+      fail-fast: true
+
+    # GitHub Environment protection：
+    # prod environment 應在 GitHub UI 設定 required reviewers，
+    # 此 job 執行前 GitHub 會暫停等待核准。
+    environment: ${{ matrix.environment }}
+
+    # 防止同環境的 concurrent apply（不取消，排隊等待）
+    concurrency:
+      group: "tf-apply-${{ matrix.environment }}"
+      cancel-in-progress: false
+
+    defaults:
+      run:
+        working-directory: terraform/argocd/${{ matrix.environment }}
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      # ── 安裝 kubectl ──────────────────────────────────────────────────────
+      # Terraform null_resource local-exec 需要 kubectl binary 在 PATH 上
+      - name: "Install kubectl"
+        uses: azure/setup-kubectl@v5
+        with:
+          version: "v1.30.0"
+
+      # ── Terraform Setup + AWS OIDC + terraform init ───────────────────────
+      - name: "Terraform Setup (init + AWS auth)"
+        uses: ./.github/actions/tf-setup
+        with:
+          environment: ${{ matrix.environment }}
+          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+
+      # ── Pre-apply plan（確認 state 是最新的）────────────────────────────
+      # 使用 -detailed-exitcode 偵測是否有變更
+      - name: "Terraform Plan (pre-apply)"
+        id: plan
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_write_kubeconfig_files: "false"
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          set +e
+          terraform plan \
+            -out="${{ runner.temp }}/tfplan.${ENVIRONMENT}" \
+            -no-color \
+            -detailed-exitcode \
+            -input=false \
+            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
+            | tee "${{ runner.temp }}/plan_output.txt"
+          PLAN_EXIT="${PIPESTATUS[0]}"
+          echo "exitcode=${PLAN_EXIT}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${PLAN_EXIT}" -eq 1 ]; then
+            echo "::error::terraform plan failed"
+            exit 1
+          fi
+
+      # ── 無變更時跳過 apply ────────────────────────────────────────────────
+      - name: "Skip Apply (no changes detected)"
+        if: steps.plan.outputs.exitcode == '0'
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          echo "✅ No infrastructure changes detected — skipping apply"
+          echo "## ✅ No Changes" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Infrastructure is already up-to-date for \`${ENVIRONMENT}\`." >> "${GITHUB_STEP_SUMMARY}"
+
+      # ── Terraform Apply ───────────────────────────────────────────────────
+      # 使用 pre-plan 的 .tfplan 檔案，確保 plan 與 apply 完全一致
+      - name: "Terraform Apply"
+        id: apply
+        if: steps.plan.outputs.exitcode == '2'
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_write_kubeconfig_files: "false"
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            "${{ runner.temp }}/tfplan.${ENVIRONMENT}"
+
+      # ── Apply Summary ─────────────────────────────────────────────────────
+      - name: "Write Apply Summary"
+        if: steps.plan.outputs.exitcode == '2' && always()
+        env:
+          APPLY_OUTCOME: ${{ steps.apply.outcome }}
+          ENVIRONMENT: ${{ matrix.environment }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ "${APPLY_OUTCOME}" = "success" ]; then
+            STATUS_LABEL="✅ Success"
+          else
+            STATUS_LABEL="❌ Failed"
+          fi
+
+          {
+            echo "## 🚀 Terraform Apply — \`${ENVIRONMENT}\`"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`${ENVIRONMENT}\` |"
+            echo "| Status | ${STATUS_LABEL} |"
+            echo "| Actor | @${ACTOR} |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo "| Run | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # ── 觸發 ArgoCD Bootstrap 驗證 ───────────────────────────────────────
+      # apply 成功後自動觸發 argo-bootstrap-verify workflow
+      - name: "Trigger ArgoCD Bootstrap Verification"
+        if: steps.apply.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const env = '${{ matrix.environment }}';
+            console.log(`Triggering ArgoCD bootstrap verification for ${env}...`);
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              workflow_id: 'argo-bootstrap-verify.yml',
+              ref:   context.ref,
+              inputs: { environment: env },
+            });
+            console.log(`✅ ArgoCD verification workflow dispatched for ${env}`);
+
+      # ── 清理 kubeconfig 臨時檔（Terraform local_sensitive_file 產生的）──
+      - name: "Cleanup sensitive files"
+        if: always()
+        run: |
+          KUBECONFIG_FILE="$(pwd)/.bootstrap.kubeconfig"
+          if [ -f "${KUBECONFIG_FILE}" ]; then
+            shred -u "${KUBECONFIG_FILE}" 2>/dev/null || rm -f "${KUBECONFIG_FILE}"
+            echo "Cleaned up .bootstrap.kubeconfig"
+          fi

@@ -1,0 +1,143 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# _bootstrap-backend.yml — 可重用 Workflow：確保 S3 State Bucket 存在
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# 由 terraform-apply-dev.yml 與 terraform-apply-prod.yml 在 apply 前呼叫。
+#
+# 功能：
+#   - 使用 terraform/environments/bootstrap/ 冪等建立 S3 state bucket
+#   - Bucket 名稱從 terraform/argocd/<environment>/backend.tf 讀取
+#
+# 流程：
+#   1. Configure AWS via OIDC
+#   2. 從環境專屬 backend HCL 讀取 bucket 名稱
+#   3. 檢查 S3 bucket 是否已存在（aws s3api head-bucket）
+#   4. bucket 已存在 → 跳過所有 Terraform 步驟（冪等跳過）
+#   5. bucket 不存在 → terraform init → terraform apply
+#
+# 冪等保護：
+#   bucket 存在即視為已完成，直接跳過 init 與 apply，避免重複執行。
+#   不使用 GitHub Actions cache，也不需要 terraform import。
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "_Bootstrap S3 Backend"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment for OIDC credentials (dev | prod)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  bootstrap:
+    name: "Bootstrap [${{ inputs.environment }}]"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        working-directory: terraform/environments/bootstrap
+
+    steps:
+      # ── 驗證 OIDC 前提條件 ──────────────────────────────────────────────────
+      - name: "Validate OIDC prerequisites"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          if [ -z "${AWS_ACCOUNT_ID}" ]; then
+            echo "::error title=Missing Secret::AWS_ACCOUNT_ID repository secret is not configured"
+            echo "See README.md → CI/CD Configuration"
+            exit 1
+          fi
+          echo "AWS Account ID configured ✓"
+
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      # ── AWS OIDC 認證 ────────────────────────────────────────────────────────
+      # Account ID 來自 Repository Secret
+      - name: "Configure AWS Credentials (OIDC)"
+        uses: ./.github/actions/configure-aws-credentials
+        with:
+          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+
+      # ── 從環境專屬 backend HCL 讀取 bucket 名稱 ───────────────────────────
+      # 不在 workflow 中 hardcode bucket name。
+      - name: "Read bucket name from backend config"
+        id: read-bucket
+        working-directory: ${{ github.workspace }}
+        env:
+          BACKEND_ENV: ${{ inputs.environment }}
+        run: |
+          case "${BACKEND_ENV}" in
+            dev|prod) ;;
+            *)
+              echo "::error::Unsupported backend environment: ${BACKEND_ENV}"
+              exit 1
+              ;;
+          esac
+
+          BACKEND_CONFIG="terraform/argocd/${BACKEND_ENV}/backend.tf"
+          if [ ! -f "${BACKEND_CONFIG}" ]; then
+            echo "::error::Backend config not found: ${BACKEND_CONFIG}"
+            exit 1
+          fi
+
+          BUCKET=$(grep 'bucket' "${BACKEND_CONFIG}" \
+            | sed 's/.*=\s*"\(.*\)".*/\1/')
+          if [ -z "${BUCKET}" ]; then
+            echo "::error::Failed to parse bucket name from ${BACKEND_CONFIG}"
+            exit 1
+          fi
+          echo "bucket=${BUCKET}" >> "${GITHUB_OUTPUT}"
+          echo "State bucket: ${BUCKET}"
+
+      # ── 檢查 S3 bucket 是否已存在（冪等保護）──────────────────────────────
+      # bucket 存在即視為已完成，後續所有 Terraform 步驟均跳過。
+      - name: "Check Bucket Exists"
+        id: check-bucket
+        env:
+          TF_STATE_BUCKET: ${{ steps.read-bucket.outputs.bucket }}
+        run: |
+          if aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
+            echo "Bucket ${TF_STATE_BUCKET} already exists — skipping creation"
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Bucket ${TF_STATE_BUCKET} does not exist — will create"
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # ── Setup Terraform ──────────────────────────────────────────────────────
+      - name: "Setup Terraform"
+        if: steps.check-bucket.outputs.exists == 'false'
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "~1.10"
+          terraform_wrapper: true
+
+      # ── terraform init（local backend，不帶 -backend-config）────────────────
+      - name: "Terraform Init"
+        if: steps.check-bucket.outputs.exists == 'false'
+        run: terraform init -input=false
+        env:
+          TF_IN_AUTOMATION: "true"
+
+      # ── terraform apply ──────────────────────────────────────────────────────
+      - name: "Terraform Apply"
+        if: steps.check-bucket.outputs.exists == 'false'
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_STATE_BUCKET: ${{ steps.read-bucket.outputs.bucket }}
+        run: |
+          terraform apply \
+            -var="tf_state_bucket=${TF_STATE_BUCKET}" \
+            -auto-approve \
+            -input=false \
+            -no-color \
+            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*="

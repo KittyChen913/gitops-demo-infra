@@ -1,0 +1,22 @@
+name: 'Configure AWS Credentials'
+description: 'Configure AWS credentials via OIDC (no stored access key)'
+
+inputs:
+  aws-account-id:
+    description: 'AWS Account ID (stored as Repository Secret)'
+    required: true
+  aws-region:
+    description: 'AWS Region'
+    required: false
+    default: 'ap-southeast-1'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-id }}:role/github-oidc-gitops-demo-infra-role
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: "GitHubActions-${{ github.run_id }}"
+        mask-aws-account-id: true

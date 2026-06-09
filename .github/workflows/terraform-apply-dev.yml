@@ -1,0 +1,235 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Terraform Apply — Dev Environment Pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# ⚠️  此 workflow 僅用於 DEV 環境，與 prod 完全隔離。
+#     Prod 環境請見 terraform-apply-prod.yml（tag-based trigger）
+#
+# 觸發時機：
+#   push to master，且異動路徑命中基礎設施相關檔案
+#   （docs/README/Markdown 等文件變更不觸發此 pipeline）
+#
+# 設計原則：
+#   - 每次 commit to master 皆可自動觸發（frequent execution）
+#   - 只 apply dev，不接觸 prod 任何資源
+#   - paths allowlist（allowlist > denylist，明確比例外安全）
+#     等效效果：排除 *.md、docs/、README.md 等純文件變更
+#   - AWS credentials 透過 OIDC（無 stored key）
+#   - GitHub Environment "dev" 可加 branch protection（限 master only）
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  TRIGGER DESIGN                                                         │
+# │  push: branches: [master]  ← dev 允許頻繁觸發                          │
+# │  paths: allowlist        ← 只有基礎設施變更才觸發（排除 docs/md）       │
+# │  workflow_dispatch       ← 手動補跑（dev only）                        │
+# └─────────────────────────────────────────────────────────────────────────┘
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "🟢 Terraform Apply [dev]"
+
+on:
+  push:
+    branches:
+      - master
+    # ── Path Allowlist（等同 paths-ignore docs）────────────────────────────
+    # 僅 dev root、bootstrap、共用 module、Argo CD manifest 與此 pipeline
+    # 的直接依賴變更才觸發。Prod-only、文件與一般 workflow 變更不部署 dev。
+    paths:
+      - "terraform/argocd/dev/**"
+      - "terraform/environments/bootstrap/**"
+      - "terraform/modules/argocd/**"
+      - "argocd/**"
+      - ".github/workflows/terraform-apply-dev.yml"
+      - ".github/actions/**"
+
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "觸發原因（選填，用於 audit log）"
+        required: false
+        default: "manual re-run"
+
+# 最小化 token 權限
+permissions:
+  contents: read
+  id-token: write
+  actions: write   # 觸發 argo-bootstrap-verify workflow
+
+# 同一時間只允許一個 dev apply 執行（排隊，不取消）
+concurrency:
+  group: "tf-apply-dev"
+  cancel-in-progress: false
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: Bootstrap S3 Backend（確保 state bucket 存在）
+  # ────────────────────────────────────────────────────────────────────────────
+  bootstrap-backend:
+    name: "Bootstrap S3 Backend"
+    uses: ./.github/workflows/_bootstrap-backend.yml
+    with:
+      environment: dev
+    secrets: inherit
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Terraform Apply — Dev
+  # ────────────────────────────────────────────────────────────────────────────
+  apply:
+    name: "Apply [dev]"
+    needs: bootstrap-backend
+    runs-on: ubuntu-latest
+
+    # GitHub Environment "dev"：
+    # - 使用 dev environment 的 protection rules
+    # - 可設定 Deployment branches → master only（避免 feature branch 誤觸發）
+    environment: dev
+
+    defaults:
+      run:
+        working-directory: terraform/argocd/dev
+
+    steps:
+      - name: "Validate OIDC prerequisites"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          if [ -z "${AWS_ACCOUNT_ID}" ]; then
+            echo "::error title=Missing Secret::AWS_ACCOUNT_ID repository secret is not configured"
+            echo "See README.md → CI/CD Configuration"
+            exit 1
+          fi
+          echo "AWS Account ID configured ✓"
+
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      # ── 顯示觸發資訊（Audit Log）───────────────────────────────────────────────────
+      - name: "Log trigger context"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          echo "=== Dev Apply Trigger Context ==="
+          echo "Event      : ${EVENT_NAME}"
+          echo "Actor      : ${ACTOR}"
+          echo "Branch     : ${REF_NAME}"
+          echo "Commit SHA : ${{ github.sha }}"
+          echo "Run ID     : ${{ github.run_id }}"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "Reason     : ${REASON}"
+          fi
+
+      # ── 安裝 kubectl ──────────────────────────────────────────────────────
+      - name: "Install kubectl"
+        uses: azure/setup-kubectl@v5
+        with:
+          version: "v1.30.0"
+
+      # ── Terraform Setup + AWS OIDC + terraform init ───────────────────────
+      - name: "Terraform Setup (init + AWS auth)"
+        uses: ./.github/actions/tf-setup
+        with:
+          environment: dev
+          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+
+      # ── Pre-apply Plan ────────────────────────────────────────────────────
+      - name: "Terraform Plan (pre-apply)"
+        id: plan
+        run: |
+          set +e
+          terraform plan \
+            -out="${{ runner.temp }}/tfplan.dev" \
+            -no-color \
+            -detailed-exitcode \
+            -input=false \
+            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
+            | tee "${{ runner.temp }}/plan_output.txt"
+          PLAN_EXIT="${PIPESTATUS[0]}"
+          echo "exitcode=${PLAN_EXIT}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${PLAN_EXIT}" -eq 1 ]; then
+            echo "::error::terraform plan failed"
+            exit 1
+          fi
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_write_kubeconfig_files: "false"
+
+      # ── 無變更時跳過 ──────────────────────────────────────────────────────
+      - name: "Skip Apply (no changes)"
+        if: steps.plan.outputs.exitcode == '0'
+        run: |
+          echo "✅ No infrastructure changes — skipping apply"
+          echo "## ✅ No Changes" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Dev infrastructure is already up-to-date." >> "${GITHUB_STEP_SUMMARY}"
+
+      # ── Terraform Apply ───────────────────────────────────────────────────
+      - name: "Terraform Apply"
+        id: apply
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            "${{ runner.temp }}/tfplan.dev"
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_write_kubeconfig_files: "false"
+
+      # ── Apply Summary ─────────────────────────────────────────────────────
+      - name: "Write Apply Summary"
+        if: steps.plan.outputs.exitcode == '2' && always()
+        env:
+          APPLY_OUTCOME: ${{ steps.apply.outcome }}
+          ACTOR: ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "${APPLY_OUTCOME}" = "success" ]; then
+            STATUS_LABEL="✅ Success"
+          else
+            STATUS_LABEL="❌ Failed"
+          fi
+
+          {
+            echo "## 🟢 Terraform Apply — \`dev\`"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`dev\` |"
+            echo "| Status | ${STATUS_LABEL} |"
+            echo "| Trigger | \`${{ github.event_name }}\` |"
+            echo "| Actor | @${ACTOR} |"
+            echo "| Branch | \`${REF_NAME}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo "| Run | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # ── 觸發 ArgoCD Bootstrap 驗證 ───────────────────────────────────────
+      - name: "Trigger ArgoCD Bootstrap Verification"
+        if: steps.apply.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            console.log('Triggering ArgoCD bootstrap verification for dev...');
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              workflow_id: 'argo-bootstrap-verify.yml',
+              ref:   context.ref,
+              inputs: { environment: 'dev' },
+            });
+            console.log('✅ ArgoCD verification dispatched for dev');
+
+      # ── 清理敏感臨時檔案 ──────────────────────────────────────────────────
+      - name: "Cleanup sensitive files"
+        if: always()
+        run: |
+          KUBECONFIG_FILE="$(pwd)/.bootstrap.kubeconfig"
+          if [ -f "${KUBECONFIG_FILE}" ]; then
+            shred -u "${KUBECONFIG_FILE}" 2>/dev/null || rm -f "${KUBECONFIG_FILE}"
+            echo "Cleaned up .bootstrap.kubeconfig"
+          fi

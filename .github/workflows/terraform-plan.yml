@@ -1,0 +1,282 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Terraform Plan — PR Validation Pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# 觸發時機：Pull Request 對 master 且命中 infra paths，或手動選擇環境
+#
+# 行為：
+#   1. 偵測目標 environment（依 PR label: env:dev / env:prod，預設 dev）
+#   2. terraform fmt --check
+#   3. terraform validate
+#   4. terraform plan（-detailed-exitcode，不 apply）
+#   5. 將 plan 結果以 comment 貼回 PR
+#   6. 若有變更，上傳 plan artifact（供審閱與除錯保留）
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  DOCS CHANGE HANDLING                                                   │
+# │  此 workflow 使用 paths allowlist，以下變更不會觸發此 pipeline：           │
+# │    ✅ *.md / README.md     → 不在 paths allowlist 中                    │
+# │    ✅ docs/**              → 不在 paths allowlist 中                    │
+# │    ✅ diagram assets       → 不在 paths allowlist 中                    │
+# │  NOTE: GitHub Actions 不允許同一 event 同時使用 paths 和 paths-ignore，   │
+# │  此處以 paths allowlist 實現等效的 docs-ignore 效果，且更安全（明確範圍）   │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# 安全注意：
+#   - prod plan 需明確標 PR label "env:prod"，避免非預期觸發
+#   - Plan output 經過截斷，避免 sensitive output 超長洩漏
+#   - AWS credentials 透過 OIDC（無 stored secret key）
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: "🔍 Terraform Plan"
+
+on:
+  pull_request:
+    branches: [master]
+    # ── Path Allowlist（等同 paths-ignore docs）────────────────────────────
+    # 僅在以下路徑發生 PR 變更時觸發：
+    #   terraform/**              → Terraform 設定變更
+    #   argocd/**                 → ArgoCD bootstrap/install 變更
+    #   .github/workflows/...    → CI workflow 本身變更
+    #   .github/actions/**       → Composite action 變更
+    # *.md、docs/、README.md 不在此 allowlist 中，因此文件變更不觸發 plan。
+    paths:
+      - "terraform/**"
+      - "argocd/**"
+      - ".github/workflows/terraform-*.yml"
+      - ".github/actions/**"
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to plan"
+        required: true
+        type: choice
+        options: [all, dev, prod]
+        default: all
+
+# 最小化 token 權限（Principle of Least Privilege）
+permissions:
+  contents: read
+  pull-requests: write   # 貼 PR comment
+  id-token: write        # OIDC token 取得
+
+# 同一 PR/branch 有新 push 時，取消舊的 plan run，節省 CI minutes
+concurrency:
+  group: "tf-plan-${{ github.event.pull_request.number || github.run_id }}"
+  cancel-in-progress: true
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: 偵測目標 environment
+  # 透過 PR label 決定要 plan 哪個 environment
+  # ────────────────────────────────────────────────────────────────────────────
+  detect-environment:
+    name: "Detect Target Environment"
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: "Validate OIDC prerequisites"
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          if [ -z "${AWS_ACCOUNT_ID}" ]; then
+            echo "::error title=Missing Secret::AWS_ACCOUNT_ID repository secret is not configured"
+            echo "See README.md → CI/CD Configuration"
+            exit 1
+          fi
+          echo "AWS Account ID configured ✓"
+
+      - name: "Set environment matrix"
+        id: set-matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            case "${INPUT_ENVIRONMENT}" in
+              all)
+                echo 'matrix={"environment":["dev","prod"]}' >> "${GITHUB_OUTPUT}"
+                ;;
+              dev|prod)
+                echo "matrix={\"environment\":[\"${INPUT_ENVIRONMENT}\"]}" >> "${GITHUB_OUTPUT}"
+                ;;
+              *)
+                echo "::error::Unsupported environment: ${INPUT_ENVIRONMENT}"
+                exit 1
+                ;;
+            esac
+            echo "Manual plan target: ${INPUT_ENVIRONMENT}"
+            exit 0
+          fi
+
+          echo "PR labels: ${LABELS_JSON}"
+
+          # prod plan 需明確標 "env:prod" label 才觸發，避免意外 plan prod
+          if echo "${LABELS_JSON}" | grep -q '"env:prod"'; then
+            echo 'matrix={"environment":["prod"]}' >> "${GITHUB_OUTPUT}"
+            echo "Target: prod (explicit label)"
+          elif echo "${LABELS_JSON}" | grep -q '"env:dev"'; then
+            echo 'matrix={"environment":["dev"]}' >> "${GITHUB_OUTPUT}"
+            echo "Target: dev (explicit label)"
+          else
+            # 預設：所有 PR 都對 dev 執行 plan
+            echo 'matrix={"environment":["dev"]}' >> "${GITHUB_OUTPUT}"
+            echo "Target: dev (default)"
+          fi
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Terraform Plan（matrix: 每個 environment 獨立執行）
+  # ────────────────────────────────────────────────────────────────────────────
+  plan:
+    name: "Plan [${{ matrix.environment }}]"
+    needs: detect-environment
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.detect-environment.outputs.matrix) }}
+      fail-fast: false
+
+    # GitHub Environment：隔離 dev/prod secrets，prod 可加 protection rules
+    environment: ${{ matrix.environment }}
+
+    defaults:
+      run:
+        working-directory: terraform/argocd/${{ matrix.environment }}
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      # ── Terraform Setup + AWS OIDC + terraform init ────────────────────────
+      - name: "Terraform Setup (init + AWS auth)"
+        uses: ./.github/actions/tf-setup
+        with:
+          environment: ${{ matrix.environment }}
+          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+
+      # ── fmt check ──────────────────────────────────────────────────────────
+      - name: "Terraform Format Check"
+        id: fmt
+        run: terraform fmt -check -recursive -diff "${GITHUB_WORKSPACE}/terraform"
+        continue-on-error: true   # 格式問題不 block，但會反映在 PR comment
+
+      # ── validate ───────────────────────────────────────────────────────────
+      - name: "Terraform Validate"
+        id: validate
+        run: terraform validate -no-color
+        env:
+          TF_IN_AUTOMATION: "true"
+
+      # ── plan ───────────────────────────────────────────────────────────────
+      # -detailed-exitcode: 0=no-change, 1=error, 2=changes-present
+      # plan artifact 儲存在 $RUNNER_TEMP（不在 working-dir）避免意外提交
+      - name: "Terraform Plan"
+        id: plan
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_write_kubeconfig_files: "false"
+          ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          set +e
+          terraform plan \
+            -out="${{ runner.temp }}/tfplan.${ENVIRONMENT}" \
+            -no-color \
+            -detailed-exitcode \
+            -input=false \
+            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
+            | tee "${{ runner.temp }}/plan_output.txt"
+          PLAN_EXIT="${PIPESTATUS[0]}"
+          echo "exitcode=${PLAN_EXIT}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${PLAN_EXIT}" -eq 1 ]; then
+            echo "::error::terraform plan failed with exit code 1"
+            exit 1
+          fi
+
+      # ── Upload plan artifact（僅在有變更時上傳）───────────────────────────
+      # artifact 供審閱與除錯保留；apply workflows 會在部署前重新產生 plan
+      - name: "Upload Plan Artifact"
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/upload-artifact@v7
+        with:
+          name: "tfplan-${{ matrix.environment }}-${{ github.sha }}"
+          path: "${{ runner.temp }}/tfplan.${{ matrix.environment }}"
+          retention-days: 7
+          if-no-files-found: error
+
+      # ── Post plan result to PR comment ────────────────────────────────────
+      - name: "Post Plan Summary to PR"
+        uses: actions/github-script@v7
+        if: always() && github.event_name == 'pull_request'
+        env:
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          ENVIRONMENT: ${{ matrix.environment }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const planFile = `${process.env.RUNNER_TEMP}/plan_output.txt`;
+            let planOutput = '(plan output not available)';
+            try { planOutput = fs.readFileSync(planFile, 'utf8'); } catch (_) {}
+
+            const icon  = (r) => r === 'success' ? '✅' : r === 'skipped' ? '⏭️' : '❌';
+            const env   = process.env.ENVIRONMENT;
+            const exit  = process.env.PLAN_EXITCODE;
+
+            let planBadge;
+            if      (exit === '0') planBadge = '✅ No changes — infrastructure is up-to-date';
+            else if (exit === '2') planBadge = '⚠️ Changes detected — review before applying';
+            else                   planBadge = '❌ Plan failed — check the Actions log';
+
+            // Truncate at 60 KB to stay under GitHub comment size limit
+            const MAX = 60_000;
+            const safePlan = planOutput.length > MAX
+              ? planOutput.slice(0, MAX) + '\n\n…(truncated — see full output in Actions run)'
+              : planOutput;
+
+            const body = [
+              `## 🔍 Terraform Plan — \`${env}\` environment`,
+              '',
+              `| Check | Status |`,
+              `|-------|--------|`,
+              `| 📐 Format   | ${icon('${{ steps.fmt.outcome }}')} \`${{ steps.fmt.outcome }}\` |`,
+              `| ✔️ Validate | ${icon('${{ steps.validate.outcome }}')} \`${{ steps.validate.outcome }}\` |`,
+              `| 📋 Plan     | ${planBadge} |`,
+              '',
+              `<details><summary>📄 Plan Output</summary>`,
+              '',
+              '```hcl',
+              safePlan,
+              '```',
+              '</details>',
+              '',
+              '---',
+              `> @${{ github.actor }} · \`${{ github.event.pull_request.head.sha }}\` · [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+            ].join('\n');
+
+            const MARKER = `Terraform Plan — \`${env}\` environment`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      # ── 若 plan 失敗，讓整個 job 失敗 ────────────────────────────────────
+      - name: "Fail job if plan errored"
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
