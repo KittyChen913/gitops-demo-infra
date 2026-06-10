@@ -1,23 +1,22 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# _bootstrap-backend.yml — 可重用 Workflow：確保 S3 State Bucket 存在
+# _bootstrap-backend.yml — 可重用 Workflow：確認既有 S3 State Bucket
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # 由 terraform-apply-dev.yml 與 terraform-apply-prod.yml 在 apply 前呼叫。
 #
 # 功能：
-#   - 使用 terraform/environments/bootstrap/ 冪等建立 S3 state bucket
+#   - 確認既有 S3 state bucket 可由部署帳號存取
 #   - Bucket 名稱從 terraform/argocd/<environment>/backend.tf 讀取
 #
 # 流程：
 #   1. Configure AWS via OIDC
 #   2. 從環境專屬 backend HCL 讀取 bucket 名稱
-#   3. 確認 S3 bucket 是否存在、可存取且由目前 AWS 帳號擁有
-#   4. 只有明確不存在（404）時才執行 terraform init → terraform apply
-#   5. 每次執行都校正 versioning、encryption 與 public access block
+#   3. 確認 S3 bucket 存在、可存取且由目前 AWS 帳號擁有
+#   4. 每次執行都校正 versioning、encryption 與 public access block
 #
 # 冪等保護：
-#   bucket 存在時不重複建立，但仍會校正必要的安全設定。
-#   不使用 GitHub Actions cache，也不需要 terraform import。
+#   本 repository 使用既有 bucket 與專屬 state key，不建立 bucket。
+#   驗證失敗時立即停止，避免將 ownership 或 IAM 問題誤判為 bucket 不存在。
 # ──────────────────────────────────────────────────────────────────────────────
 
 name: "_Bootstrap S3 Backend"
@@ -98,66 +97,22 @@ jobs:
           echo "bucket=${BUCKET}" >> "${GITHUB_OUTPUT}"
           echo "State bucket: ${BUCKET}"
 
-      # ── 確認 S3 bucket 是否存在且可由目前帳號使用 ──────────────────────────
-      # 只有明確的 404 才代表可建立；403 可能是權限不足或 bucket 屬於其他帳號。
-      - name: "Check Bucket Exists"
-        id: check-bucket
+      # ── 確認既有 S3 bucket 可由目前帳號使用 ────────────────────────────────
+      # HeadBucket 的 403/404 都可能代表 ownership 或 IAM 問題，因此不自動建立。
+      - name: "Verify Existing Bucket Access"
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           TF_STATE_BUCKET: ${{ steps.read-bucket.outputs.bucket }}
         run: |
-          if HEAD_BUCKET_ERROR=$(aws s3api head-bucket \
+          if ! HEAD_BUCKET_ERROR=$(aws s3api head-bucket \
             --bucket "${TF_STATE_BUCKET}" \
             --expected-bucket-owner "${AWS_ACCOUNT_ID}" 2>&1); then
-            echo "Bucket ${TF_STATE_BUCKET} already exists — skipping creation"
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-            exit 0
+            echo "::error title=Existing S3 backend is not accessible::Bucket ${TF_STATE_BUCKET} must already exist, be owned by AWS account ${AWS_ACCOUNT_ID}, and allow the OIDC role to call HeadBucket (s3:ListBucket)."
+            echo "::error::${HEAD_BUCKET_ERROR}"
+            exit 1
           fi
 
-          case "${HEAD_BUCKET_ERROR}" in
-            *"(404)"*|*"Not Found"*)
-              echo "Bucket ${TF_STATE_BUCKET} does not exist — will create"
-              echo "exists=false" >> "${GITHUB_OUTPUT}"
-              ;;
-            *"(403)"*|*"Forbidden"*)
-              echo "::error title=S3 bucket is not accessible::Bucket ${TF_STATE_BUCKET} either belongs to another AWS account or the OIDC role lacks s3:ListBucket access. S3 bucket names are globally unique; verify bucket ownership, the AWS_ACCOUNT_ID secret, IAM permissions, and the bucket policy."
-              exit 1
-              ;;
-            *)
-              echo "::error title=Unable to inspect S3 bucket::${HEAD_BUCKET_ERROR}"
-              exit 1
-              ;;
-          esac
-
-      # ── Setup Terraform ──────────────────────────────────────────────────────
-      - name: "Setup Terraform"
-        if: steps.check-bucket.outputs.exists == 'false'
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: "~1.10"
-          terraform_wrapper: true
-
-      # ── terraform init（local backend，不帶 -backend-config）────────────────
-      - name: "Terraform Init"
-        if: steps.check-bucket.outputs.exists == 'false'
-        run: terraform init -input=false
-        env:
-          TF_IN_AUTOMATION: "true"
-
-      # ── terraform apply ──────────────────────────────────────────────────────
-      - name: "Terraform Apply"
-        if: steps.check-bucket.outputs.exists == 'false'
-        env:
-          TF_IN_AUTOMATION: "true"
-          TF_STATE_BUCKET: ${{ steps.read-bucket.outputs.bucket }}
-        run: |
-          set -o pipefail
-          terraform apply \
-            -var="tf_state_bucket=${TF_STATE_BUCKET}" \
-            -auto-approve \
-            -input=false \
-            -no-color \
-            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*="
+          echo "Existing state bucket ${TF_STATE_BUCKET} is accessible"
 
       # ── 校正既有 bucket 的必要安全設定 ─────────────────────────────────────
       # Bootstrap 使用 ephemeral local state，且不允許 terraform import。
