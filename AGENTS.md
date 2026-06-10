@@ -1,0 +1,93 @@
+# Agent 指引
+
+這些指引適用於整個 `gitops-demo-infra` repository。編輯程式碼、Terraform、GitHub Actions、腳本或文件時都必須遵循。
+
+## Repository 範圍
+
+- 本 repository 管理平台與 GitOps 層：安裝 Argo CD、Argo CD 自我管理、註冊 worker cluster，以及初始化根 Application。
+- Kubernetes 叢集佈建由 `gitops-demo-cluster` 負責，不屬於本 repository。
+- Application manifest 與 ApplicationSet 由 `gitops-demo-apps` 負責，不屬於本 repository。
+- 預設分支是 `master`，不是 `main`。
+
+## 目錄結構
+
+- `terraform/argocd/dev/`：dev 環境的正式 Terraform root，包含靜態 backend 與環境設定。
+- `terraform/argocd/prod/`：prod 環境的正式 Terraform root，包含靜態 backend 與環境設定。
+- `terraform/modules/argocd/`：dev 與 prod 共用的 Argo CD Terraform module。
+- `terraform/environments/bootstrap/`：保留 S3 state bucket 的 local-backend Terraform 定義；apply workflow 不執行此 root，也不負責建立 bucket。
+- `argocd/install/`：安裝 Argo CD 的 Kustomize manifest。
+- `argocd/bootstrap/`：Argo CD 自我管理與根 Application manifest。
+- `.github/actions/`：本地 composite action。
+- `.github/workflows/`：GitHub Actions workflow。
+- `scripts/`：CI 輔助腳本。
+- `docs/`：CI/CD 與設定文件。
+
+## Terraform 規則
+
+- 不得在 provider block 中寫死 AWS region，必須使用 `var.aws_region`。
+- 不得將 AWS region 儲存為 GitHub variable。Workflow 可直接傳入固定的 OIDC region `ap-southeast-1`。
+- `terraform/argocd/<environment>/backend.tf` 必須包含完整靜態 S3 backend 設定：`bucket`、`region`、`key`、`encrypt` 與 `use_lockfile`。
+- dev 與 prod state key 必須分別為 `gitops-demo-infra/dev/argocd/terraform.tfstate` 與 `gitops-demo-infra/prod/argocd/terraform.tfstate`。
+- 非 bootstrap 的 Terraform init 必須直接在 `terraform/argocd/dev` 或 `terraform/argocd/prod` 執行，不得使用 `-backend-config` 動態注入 backend 值。
+- `terraform/environments/bootstrap` 必須使用 `backend "local" {}`，且不得使用 `-backend-config`。
+- S3 state bucket 必須由 repository 外部流程預先建立；本 repository 的 workflow 與 OIDC role 不得要求或使用 `s3:CreateBucket`。
+- Terraform state、plan、kubeconfig 與 `terraform.tfvars` 都不得提交。
+
+## CI/CD 與 GitHub Actions
+
+- GitHub Actions 的 AWS 驗證只能使用 OIDC。
+- 不得使用、宣告或傳遞 `secrets.AWS_ACCESS_KEY_ID` 或 `secrets.AWS_SECRET_ACCESS_KEY`。
+- 必須透過 `.github/actions/configure-aws-credentials` 設定 AWS credentials；workflow 不得直接呼叫 `aws-actions/configure-aws-credentials`。
+- `AWS_ACCOUNT_ID` 必須儲存為 GitHub Repository Secret，並以 `secrets.AWS_ACCOUNT_ID` 引用。
+- 需要 AWS 的 job 必須包含 `permissions: id-token: write` 與 `contents: read`。
+- 只有 job 透過 `uses: ./.github/workflows/...` 呼叫 reusable workflow 時才需要 `secrets: inherit`；composite action 不使用此設定。
+- 修改 composite action 時，必須透過 `.github/actions/**` 將變更納入相關 workflow 的 `paths` filter。
+- 使用目前的 action major tag：`actions/checkout@v6`、`hashicorp/setup-terraform@v4`、`actions/upload-artifact@v7`、`azure/setup-kubectl@v5` 與 `aws-actions/configure-aws-credentials@v6`。
+
+## Workflow 職責
+
+- `terraform-plan.yml` 是針對 `master` pull request 的 PR gate。
+- `terraform-apply-dev.yml` 會在 push 至 `master` 或手動觸發時部署 dev。
+- `terraform-apply-prod.yml` 會從 commit 可追溯至 `master` 的 SemVer tag 部署 prod；prod 必須依賴 GitHub Environment 核准。
+- `terraform-apply.yml` 僅供手動 override 使用。
+- `_bootstrap-backend.yml` 只能確認既有 S3 backend bucket 的 ownership/access，並冪等校正 versioning、encryption 與 public access block；不得建立 bucket，也不得使用 GitHub Actions cache 或 Terraform import。
+- Apply workflow 必須將部署分成依序執行的四個 job：驗證 S3 backend、安裝 Argo CD、註冊 Argo CD self-managed Application、註冊 ATeam Root Application。
+- 三個 Argo CD Terraform job 必須使用相同環境的遠端 state，並透過 `_terraform-apply-stage.yml` 執行對應的 targeted plan/apply。
+- 僅修改文件時，不應觸發部署 workflow。
+
+## Workflow 安全規則
+
+- 在 `run:` block 中，必須先將 `inputs.*`、`github.ref_name`、`github.actor`、`github.ref_type` 等可由使用者控制的 expression 移至 `env:`，再於 shell 中引用環境變數。
+- Plan、apply 與 destroy log 必須過濾包含 token、secret 或 password 賦值的行。
+- 若存在 `write_kubeconfig_files` 變數，CI 執行 Terraform 時必須設定 `TF_VAR_write_kubeconfig_files: "false"`。
+- Provider token 與叢集 credentials 必須存放於 AWS SSM Parameter Store，不得存放於 GitHub Secrets。
+- Workflow 需要取得共用 SSM provider token 時，必須使用 `.github/actions/get-ssm-parameters`。
+
+## Argo CD 與 GitOps
+
+- Terraform 從 `argocd/install/` 安裝 Argo CD，並套用 `argocd/bootstrap/` 中的 bootstrap manifest。
+- 根 Application manifest 位於 `argocd/bootstrap/<team>/`。
+- Management cluster 只運行 Argo CD；worker cluster 運行應用程式 workload。
+- 不得將 application layer manifest 加入本 repository。
+- 除非 workflow 明確用於驗證或緊急處理，否則不得為 Terraform 已處理的 bootstrap 行為手動加入 `kubectl apply` 步驟。
+
+## 腳本與部署命令
+
+- Shell 腳本必須通過 ShellCheck。
+- Terraform init、plan 與 apply 必須透過 GitHub Actions 執行，不得加入本機部署 helper。
+- Health 腳本與 verification workflow 不得輸出 token、CA data 或 kubeconfig 內容。
+
+## 文件同步
+
+- 修改 workflow、trigger、SSM path、GitHub Environment 要求、backend 行為或手動命令時，必須同步更新 `docs/ci-cd.md`。
+- 修改必要 secret、variable、IAM permission 或 OIDC 設定時，必須同步更新 `docs/ci-secrets.md`。
+- README 中的範例必須與 `docs/ci-cd.md` 保持一致。
+- 分支相關的 workflow 設定、註解與文件都必須使用 `master`。
+
+## 驗證
+
+- 修改 workflow 時，應盡可能執行 actionlint：
+  `docker run --rm -v "${PWD}:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color`
+- 修改腳本時，應盡可能執行 ShellCheck：
+  `docker run --rm --entrypoint shellcheck -v "${PWD}:/repo" --workdir /repo rhysd/actionlint:1.7.12 scripts/cluster-health.sh`
+- 修改 Terraform 時，若 dependencies 與 backend 均可使用，應在相關 Terraform root 執行 `terraform fmt` 與 `terraform validate`。
