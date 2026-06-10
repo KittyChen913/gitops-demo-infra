@@ -4,8 +4,7 @@
 #       倉庫中 argocd/applicationsets/gitops-demo-dev.yaml 定義的 ApplicationSet。
 #
 # 部署方式：
-#   由 Terraform null_resource.argocd_root_app 自動執行（terraform apply 後自動觸發）。
-#   手動執行：kubectl apply -n argocd -f argocd/bootstrap/root-application-dev.yaml
+#   由 Terraform kustomization_resource.argocd_root_app 管理。
 #
 # 注意：
 #   - 此 Application 必須在 ArgoCD 安裝完成後才能套用。

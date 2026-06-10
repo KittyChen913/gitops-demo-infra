@@ -176,7 +176,6 @@ jobs:
         id: plan
         env:
           TF_IN_AUTOMATION: "true"
-          TF_VAR_write_kubeconfig_files: "false"
           ENVIRONMENT: ${{ matrix.environment }}
         run: |
           set +e

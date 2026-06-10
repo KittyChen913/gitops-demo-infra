@@ -29,7 +29,7 @@ data "aws_ssm_parameter" "worker_token" {
   with_decryption = true
 }
 
-# ── Management Cluster kubeconfig（共用於 kustomization provider 與 local-exec）─
+# ── Management Cluster kubeconfig（供 kustomization provider 使用）────────────
 locals {
   manifest_root = abspath("${path.module}/../../../argocd")
 
@@ -119,56 +119,22 @@ resource "kubernetes_secret_v1" "argocd_worker_cluster" {
   depends_on = [kustomization_resource.argocd_p2]
 }
 
-# ── ArgoCD Self-Managed Application Bootstrap ──────────────────────────────
-# Terraform 完成 ArgoCD 安裝後，自動套用 argocd-app.yaml，
-# 讓 ArgoCD 透過 GitOps 管理自己的安裝（self-managed bootstrap）。
-# triggers：argocd-app.yaml 內容異動時自動重新執行。
+# ── ArgoCD Self-Managed Application Bootstrap ────────────────────────────────
+# 由 Terraform provider 直接管理 Application，讓 plan 可偵測刪除與 drift。
+resource "kustomization_resource" "argocd_self_app" {
+  manifest = file("${local.manifest_root}/bootstrap/argocd-app.yaml")
 
-resource "local_sensitive_file" "mgmt_kubeconfig" {
-  content         = local.mgmt_kubeconfig_yaml
-  filename        = "${path.root}/.bootstrap.kubeconfig"
-  file_permission = "0600"
-}
-
-resource "null_resource" "argocd_self_app" {
-  triggers = {
-    manifest_sha256 = filesha256("${local.manifest_root}/bootstrap/argocd-app.yaml")
-  }
-
-  provisioner "local-exec" {
-    command = "kubectl apply -n ${var.argocd_namespace} -f \"${local.manifest_root}/bootstrap/argocd-app.yaml\""
-    environment = {
-      KUBECONFIG = abspath(local_sensitive_file.mgmt_kubeconfig.filename)
-    }
-  }
-
-  depends_on = [
-    local_sensitive_file.mgmt_kubeconfig,
-    kustomization_resource.argocd_p2,
-  ]
+  depends_on = [kustomization_resource.argocd_p2]
 }
 
 # ── Root Application Bootstrap（環境入口點）────────────────────────────────────
 # 套用對應環境的 Root Application（App of Apps），讓 ArgoCD 開始管理該環境的所有應用。
 # 須在 argocd_self_app 之後執行，確保 ArgoCD CRD 已就緒。
-# triggers：manifest 內容異動時自動重新執行。
-
-resource "null_resource" "argocd_root_app" {
+# Application 納入 Terraform state，因此刪除或 drift 會在 plan 中被偵測。
+resource "kustomization_resource" "argocd_root_app" {
   for_each = var.root_app_teams
 
-  triggers = {
-    manifest_sha256 = filesha256("${local.manifest_root}/bootstrap/${each.value}")
-  }
-
-  provisioner "local-exec" {
-    command = "kubectl apply -n ${var.argocd_namespace} -f \"${local.manifest_root}/bootstrap/${each.value}\""
-    environment = {
-      KUBECONFIG = abspath(local_sensitive_file.mgmt_kubeconfig.filename)
-    }
-  }
-
-  depends_on = [
-    null_resource.argocd_self_app,
-  ]
+  manifest   = file("${local.manifest_root}/bootstrap/${each.value}")
+  depends_on = [kustomization_resource.argocd_self_app]
 }
 

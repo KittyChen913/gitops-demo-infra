@@ -5,8 +5,8 @@
 #       此後 argocd/install/ 目錄的任何變更只需 push 到 Git，
 #       ArgoCD 就會自動同步（包含 argocd-cm patch、resource limits 等）。
 #
-# 套用時機：由 Terraform null_resource.argocd_self_app 自動執行（terraform apply 後自動觸發）。
-#           argocd-app.yaml 內容異動時，Terraform triggers 會重新執行 kubectl apply。
+# 套用時機：由 Terraform kustomization_resource.argocd_self_app 管理。
+#           內容異動、資源遭刪除或設定漂移時，Terraform plan 會偵測差異。
 
 apiVersion: argoproj.io/v1alpha1
 kind: Application
