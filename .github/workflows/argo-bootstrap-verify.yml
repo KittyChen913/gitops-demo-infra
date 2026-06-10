@@ -4,7 +4,7 @@
 #
 # 觸發方式：
 #   A. workflow_dispatch（手動觸發，可選 environment）
-#   B. 由 terraform-apply.yml 完成 apply 後自動觸發（createWorkflowDispatch）
+#   B. 由 apply workflows 以 workflow_call 呼叫並等待結果
 #
 # 驗證項目（依序）：
 #   1. Kubernetes API 連通性
@@ -24,6 +24,12 @@
 name: "🔎 ArgoCD Bootstrap Verification"
 
 on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       environment:
@@ -209,37 +215,62 @@ jobs:
         run: |
           echo "=== ArgoCD Self-Managed Application ==="
 
-          if ! kubectl get application argocd -n argocd -o name 2>/dev/null; then
-            echo "::warning::Application 'argocd' not found — self-managed bootstrap may be pending"
-          else
+          for _ in $(seq 1 30); do
+            if kubectl get application argocd -n argocd -o name >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for Application/argocd..."
+            sleep 10
+          done
+
+          if ! kubectl get application argocd -n argocd -o name >/dev/null 2>&1; then
+            echo "::error::Application 'argocd' was not created"
+            exit 1
+          fi
+
+          for _ in $(seq 1 30); do
             SYNC="$(kubectl get application argocd -n argocd \
               -o jsonpath='{.status.sync.status}' 2>/dev/null || echo 'Unknown')"
             HEALTH="$(kubectl get application argocd -n argocd \
               -o jsonpath='{.status.health.status}' 2>/dev/null || echo 'Unknown')"
 
-            echo "  Sync:   ${SYNC}"
-            echo "  Health: ${HEALTH}"
-
             if [ "${SYNC}" = "Synced" ] && [ "${HEALTH}" = "Healthy" ]; then
               echo "✅ ArgoCD self-managed application: Synced + Healthy"
-            else
-              echo "::warning::ArgoCD self-app: sync=${SYNC}, health=${HEALTH}"
+              break
             fi
+            echo "Waiting for Application/argocd: sync=${SYNC}, health=${HEALTH}"
+            sleep 10
+          done
+
+          if [ "${SYNC}" != "Synced" ] || [ "${HEALTH}" != "Healthy" ]; then
+            echo "::error::ArgoCD self-app did not become Synced + Healthy: sync=${SYNC}, health=${HEALTH}"
+            exit 1
           fi
 
       # ── 5. Root Application bootstrap ────────────────────────────────────
       - name: "5 — Root Application bootstrap"
         id: root-app
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           echo "=== Root Application Bootstrap Check ==="
-          ROOT_APP="root-application-${{ inputs.environment }}"
+          ROOT_APP="root-application-${ENVIRONMENT}"
 
-          if ! kubectl get application "${ROOT_APP}" -n argocd -o name 2>/dev/null; then
-            echo "::warning::Application '${ROOT_APP}' not found — bootstrap may be in progress"
-            echo ""
-            echo "All applications currently registered in ArgoCD:"
+          for _ in $(seq 1 30); do
+            if kubectl get application "${ROOT_APP}" -n argocd -o name >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for Application/${ROOT_APP}..."
+            sleep 10
+          done
+
+          if ! kubectl get application "${ROOT_APP}" -n argocd -o name >/dev/null 2>&1; then
+            echo "::error::Application '${ROOT_APP}' was not created"
             kubectl get applications -n argocd --no-headers 2>/dev/null || true
-          else
+            exit 1
+          fi
+
+          for _ in $(seq 1 30); do
             SYNC="$(kubectl get application "${ROOT_APP}" -n argocd \
               -o jsonpath='{.status.sync.status}' 2>/dev/null || echo 'Unknown')"
             HEALTH="$(kubectl get application "${ROOT_APP}" -n argocd \
@@ -252,36 +283,43 @@ jobs:
             echo "  Health: ${HEALTH}"
             echo "  Source: ${SOURCE}"
 
-            if [ "${SYNC}" = "Synced" ]; then
+            if [ "${SYNC}" = "Synced" ] && [ "${HEALTH}" = "Healthy" ]; then
               echo "✅ Root Application is Synced"
-            else
-              echo "::warning::Root Application sync=${SYNC}, health=${HEALTH}"
+              break
             fi
+            echo "Waiting for Application/${ROOT_APP}: sync=${SYNC}, health=${HEALTH}"
+            sleep 10
+          done
+
+          if [ "${SYNC}" != "Synced" ] || [ "${HEALTH}" != "Healthy" ]; then
+            echo "::error::Root Application did not become Synced + Healthy: sync=${SYNC}, health=${HEALTH}"
+            exit 1
           fi
 
       # ── 6. Worker cluster registration ───────────────────────────────────
       - name: "6 — Worker cluster registration"
         id: cluster-reg
+        env:
+          WORKER_LABEL: ${{ steps.fetch-creds.outputs.worker_label }}
         run: |
           echo "=== ArgoCD Cluster Registration Check ==="
+          EXPECTED_SECRET="cluster-${WORKER_LABEL}"
 
-          CLUSTER_COUNT="$(kubectl get secrets -n argocd \
-            -l "argocd.argoproj.io/secret-type=cluster" \
-            --no-headers 2>/dev/null | wc -l)"
+          for _ in $(seq 1 30); do
+            if kubectl get secret "${EXPECTED_SECRET}" -n argocd >/dev/null 2>&1; then
+              echo "✅ Worker cluster secret '${EXPECTED_SECRET}' is registered"
+              exit 0
+            fi
+            echo "Waiting for worker cluster secret '${EXPECTED_SECRET}'..."
+            sleep 10
+          done
 
-          echo "  Registered clusters: ${CLUSTER_COUNT}"
-
-          # List cluster names (server URL is base64, skip to avoid decode in log)
+          echo "::error::Expected worker cluster secret '${EXPECTED_SECRET}' was not found"
           kubectl get secrets -n argocd \
             -l "argocd.argoproj.io/secret-type=cluster" \
             -o custom-columns="NAME:.metadata.name" \
             --no-headers 2>/dev/null || true
-
-          if [ "${CLUSTER_COUNT}" -ge 1 ]; then
-            echo "✅ ${CLUSTER_COUNT} worker cluster(s) registered in ArgoCD"
-          else
-            echo "::warning::No worker clusters registered — Terraform apply may be pending"
-          fi
+          exit 1
 
       # ── Cleanup ───────────────────────────────────────────────────────────
       - name: "Cleanup sensitive files"
@@ -301,9 +339,12 @@ jobs:
       # ── Summary ───────────────────────────────────────────────────────────
       - name: "Write Verification Summary"
         if: always()
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          ACTOR: ${{ github.actor }}
         run: |
           {
-            echo "## 🔎 ArgoCD Bootstrap Verification — \`${{ inputs.environment }}\`"
+            echo "## 🔎 ArgoCD Bootstrap Verification — \`${ENVIRONMENT}\`"
             echo ""
             echo "| Check | Status |"
             echo "|-------|--------|"
@@ -315,5 +356,5 @@ jobs:
             echo "| 6. Cluster Registration | ${{ steps.cluster-reg.outcome }} |"
             echo ""
             echo "---"
-            echo "Actor: @${{ github.actor }} · Run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "Actor: @${ACTOR} · Run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           } >> "${GITHUB_STEP_SUMMARY}"

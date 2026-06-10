@@ -54,7 +54,6 @@ on:
 permissions:
   contents: read
   id-token: write
-  actions: write   # 觸發 argo-bootstrap-verify workflow
 
 # 同一時間只允許一個 dev apply 執行（排隊，不取消）
 concurrency:
@@ -122,12 +121,6 @@ jobs:
             echo "Reason     : ${REASON}"
           fi
 
-      # ── 安裝 kubectl ──────────────────────────────────────────────────────
-      - name: "Install kubectl"
-        uses: azure/setup-kubectl@v5
-        with:
-          version: "v1.30.0"
-
       # ── Terraform Setup + AWS OIDC + terraform init ───────────────────────
       - name: "Terraform Setup (init + AWS auth)"
         uses: ./.github/actions/tf-setup
@@ -156,7 +149,6 @@ jobs:
           fi
         env:
           TF_IN_AUTOMATION: "true"
-          TF_VAR_write_kubeconfig_files: "false"
 
       # ── 無變更時跳過 ──────────────────────────────────────────────────────
       - name: "Skip Apply (no changes)"
@@ -177,7 +169,6 @@ jobs:
             "${{ runner.temp }}/tfplan.dev"
         env:
           TF_IN_AUTOMATION: "true"
-          TF_VAR_write_kubeconfig_files: "false"
 
       # ── Apply Summary ─────────────────────────────────────────────────────
       - name: "Write Apply Summary"
@@ -208,29 +199,10 @@ jobs:
             echo "| Run | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      # ── 觸發 ArgoCD Bootstrap 驗證 ───────────────────────────────────────
-      - name: "Trigger ArgoCD Bootstrap Verification"
-        if: steps.apply.outcome == 'success'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            console.log('Triggering ArgoCD bootstrap verification for dev...');
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              workflow_id: 'argo-bootstrap-verify.yml',
-              ref:   context.ref,
-              inputs: { environment: 'dev' },
-            });
-            console.log('✅ ArgoCD verification dispatched for dev');
-
-      # ── 清理敏感臨時檔案 ──────────────────────────────────────────────────
-      - name: "Cleanup sensitive files"
-        if: always()
-        run: |
-          KUBECONFIG_FILE="$(pwd)/.bootstrap.kubeconfig"
-          if [ -f "${KUBECONFIG_FILE}" ]; then
-            shred -u "${KUBECONFIG_FILE}" 2>/dev/null || rm -f "${KUBECONFIG_FILE}"
-            echo "Cleaned up .bootstrap.kubeconfig"
-          fi
+  verify:
+    name: "Verify ArgoCD [dev]"
+    needs: apply
+    uses: ./.github/workflows/argo-bootstrap-verify.yml
+    with:
+      environment: dev
+    secrets: inherit

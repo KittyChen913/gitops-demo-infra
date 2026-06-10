@@ -16,7 +16,7 @@
 #   1. determine-env    ── 決定要 apply 哪個 environment
 #   2. guard-prod       ── prod apply 必須通過確認字串驗證
 #   3. apply            ── pre-plan → apply（僅在 changes 時）→ summary
-#   4. post-verify      ── 觸發 ArgoCD bootstrap 驗證（apply 後自動執行）
+#   4. verify           ── 呼叫並等待 ArgoCD bootstrap 驗證
 #
 # ┌─────────────────────────────────────────────────────────────────────────┐
 # │  TRIGGER DESIGN（此檔案）                                                │
@@ -29,8 +29,7 @@
 #   - prod 使用 GitHub Environment 的 required reviewer protection
 #   - prod workflow_dispatch 需輸入 "APPLY-PROD" 確認字串
 #   - concurrency lock 防止同環境雙重 apply
-#   - kubectl 預先安裝（Terraform null_resource local-exec 需要）
-#   - kubeconfig 由 Terraform 的 local_sensitive_file 管理，不直接操作
+#   - Argo CD bootstrap Applications 由 Terraform provider 直接管理
 #   - AWS credentials 透過 OIDC（無 stored key）
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -55,7 +54,6 @@ on:
 permissions:
   contents: read
   id-token: write
-  actions: write   # 觸發 argo-bootstrap-verify workflow
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
@@ -158,13 +156,6 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@v6
 
-      # ── 安裝 kubectl ──────────────────────────────────────────────────────
-      # Terraform null_resource local-exec 需要 kubectl binary 在 PATH 上
-      - name: "Install kubectl"
-        uses: azure/setup-kubectl@v5
-        with:
-          version: "v1.30.0"
-
       # ── Terraform Setup + AWS OIDC + terraform init ───────────────────────
       - name: "Terraform Setup (init + AWS auth)"
         uses: ./.github/actions/tf-setup
@@ -178,7 +169,6 @@ jobs:
         id: plan
         env:
           TF_IN_AUTOMATION: "true"
-          TF_VAR_write_kubeconfig_files: "false"
           ENVIRONMENT: ${{ matrix.environment }}
         run: |
           set +e
@@ -214,7 +204,6 @@ jobs:
         if: steps.plan.outputs.exitcode == '2'
         env:
           TF_IN_AUTOMATION: "true"
-          TF_VAR_write_kubeconfig_files: "false"
           ENVIRONMENT: ${{ matrix.environment }}
         run: |
           terraform apply \
@@ -249,31 +238,15 @@ jobs:
             echo "| Run | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      # ── 觸發 ArgoCD Bootstrap 驗證 ───────────────────────────────────────
-      # apply 成功後自動觸發 argo-bootstrap-verify workflow
-      - name: "Trigger ArgoCD Bootstrap Verification"
-        if: steps.apply.outcome == 'success'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const env = '${{ matrix.environment }}';
-            console.log(`Triggering ArgoCD bootstrap verification for ${env}...`);
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              workflow_id: 'argo-bootstrap-verify.yml',
-              ref:   context.ref,
-              inputs: { environment: env },
-            });
-            console.log(`✅ ArgoCD verification workflow dispatched for ${env}`);
-
-      # ── 清理 kubeconfig 臨時檔（Terraform local_sensitive_file 產生的）──
-      - name: "Cleanup sensitive files"
-        if: always()
-        run: |
-          KUBECONFIG_FILE="$(pwd)/.bootstrap.kubeconfig"
-          if [ -f "${KUBECONFIG_FILE}" ]; then
-            shred -u "${KUBECONFIG_FILE}" 2>/dev/null || rm -f "${KUBECONFIG_FILE}"
-            echo "Cleaned up .bootstrap.kubeconfig"
-          fi
+  verify:
+    name: "Verify ArgoCD [${{ matrix.environment }}]"
+    needs: [determine-env, apply]
+    strategy:
+      matrix:
+        environment: ${{ fromJSON(needs.determine-env.outputs.environments) }}
+      max-parallel: 1
+      fail-fast: true
+    uses: ./.github/workflows/argo-bootstrap-verify.yml
+    with:
+      environment: ${{ matrix.environment }}
+    secrets: inherit
