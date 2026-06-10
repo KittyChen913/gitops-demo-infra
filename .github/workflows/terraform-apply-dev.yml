@@ -40,6 +40,7 @@ on:
       - "terraform/modules/argocd/**"
       - "argocd/**"
       - ".github/workflows/terraform-apply-dev.yml"
+      - ".github/workflows/workflow-quality.yml"
       - ".github/workflows/_bootstrap-backend.yml"
       - ".github/actions/**"
 
@@ -62,17 +63,25 @@ concurrency:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 1: Bootstrap S3 Backend（確保 state bucket 存在）
+  # Job 1: Workflow / Script Quality Gate
+  # ────────────────────────────────────────────────────────────────────────────
+  quality:
+    name: "Workflow Quality"
+    uses: ./.github/workflows/workflow-quality.yml
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Bootstrap S3 Backend（確保 state bucket 存在）
   # ────────────────────────────────────────────────────────────────────────────
   bootstrap-backend:
     name: "Bootstrap S3 Backend"
+    needs: quality
     uses: ./.github/workflows/_bootstrap-backend.yml
     with:
       environment: dev
     secrets: inherit
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 2: Terraform Apply — Dev
+  # Job 3: Terraform Apply — Dev
   # ────────────────────────────────────────────────────────────────────────────
   apply:
     name: "Apply [dev]"
