@@ -11,8 +11,8 @@
 # 流程：
 #   1. Configure AWS via OIDC
 #   2. 從環境專屬 backend HCL 讀取 bucket 名稱
-#   3. 檢查 S3 bucket 是否已存在（aws s3api head-bucket）
-#   4. bucket 不存在 → terraform init → terraform apply
+#   3. 確認 S3 bucket 是否存在、可存取且由目前 AWS 帳號擁有
+#   4. 只有明確不存在（404）時才執行 terraform init → terraform apply
 #   5. 每次執行都校正 versioning、encryption 與 public access block
 #
 # 冪等保護：
@@ -98,20 +98,36 @@ jobs:
           echo "bucket=${BUCKET}" >> "${GITHUB_OUTPUT}"
           echo "State bucket: ${BUCKET}"
 
-      # ── 檢查 S3 bucket 是否已存在（冪等保護）──────────────────────────────
-      # bucket 存在即視為已完成，後續所有 Terraform 步驟均跳過。
+      # ── 確認 S3 bucket 是否存在且可由目前帳號使用 ──────────────────────────
+      # 只有明確的 404 才代表可建立；403 可能是權限不足或 bucket 屬於其他帳號。
       - name: "Check Bucket Exists"
         id: check-bucket
         env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           TF_STATE_BUCKET: ${{ steps.read-bucket.outputs.bucket }}
         run: |
-          if aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" 2>/dev/null; then
+          if HEAD_BUCKET_ERROR=$(aws s3api head-bucket \
+            --bucket "${TF_STATE_BUCKET}" \
+            --expected-bucket-owner "${AWS_ACCOUNT_ID}" 2>&1); then
             echo "Bucket ${TF_STATE_BUCKET} already exists — skipping creation"
             echo "exists=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "Bucket ${TF_STATE_BUCKET} does not exist — will create"
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
+
+          case "${HEAD_BUCKET_ERROR}" in
+            *"(404)"*|*"Not Found"*)
+              echo "Bucket ${TF_STATE_BUCKET} does not exist — will create"
+              echo "exists=false" >> "${GITHUB_OUTPUT}"
+              ;;
+            *"(403)"*|*"Forbidden"*)
+              echo "::error title=S3 bucket is not accessible::Bucket ${TF_STATE_BUCKET} either belongs to another AWS account or the OIDC role lacks s3:ListBucket access. S3 bucket names are globally unique; verify bucket ownership, the AWS_ACCOUNT_ID secret, IAM permissions, and the bucket policy."
+              exit 1
+              ;;
+            *)
+              echo "::error title=Unable to inspect S3 bucket::${HEAD_BUCKET_ERROR}"
+              exit 1
+              ;;
+          esac
 
       # ── Setup Terraform ──────────────────────────────────────────────────────
       - name: "Setup Terraform"
