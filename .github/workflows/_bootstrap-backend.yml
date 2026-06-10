@@ -12,11 +12,11 @@
 #   1. Configure AWS via OIDC
 #   2. 從環境專屬 backend HCL 讀取 bucket 名稱
 #   3. 檢查 S3 bucket 是否已存在（aws s3api head-bucket）
-#   4. bucket 已存在 → 跳過所有 Terraform 步驟（冪等跳過）
-#   5. bucket 不存在 → terraform init → terraform apply
+#   4. bucket 不存在 → terraform init → terraform apply
+#   5. 每次執行都校正 versioning、encryption 與 public access block
 #
 # 冪等保護：
-#   bucket 存在即視為已完成，直接跳過 init 與 apply，避免重複執行。
+#   bucket 存在時不重複建立，但仍會校正必要的安全設定。
 #   不使用 GitHub Actions cache，也不需要 terraform import。
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -135,9 +135,35 @@ jobs:
           TF_IN_AUTOMATION: "true"
           TF_STATE_BUCKET: ${{ steps.read-bucket.outputs.bucket }}
         run: |
+          set -o pipefail
           terraform apply \
             -var="tf_state_bucket=${TF_STATE_BUCKET}" \
             -auto-approve \
             -input=false \
             -no-color \
             2>&1 | grep -v -iE "^\s*(token|secret|password)\s*="
+
+      # ── 校正既有 bucket 的必要安全設定 ─────────────────────────────────────
+      # Bootstrap 使用 ephemeral local state，且不允許 terraform import。
+      # 因此 bucket 建立後，透過 AWS API 冪等校正可變的 bucket-level controls。
+      - name: "Reconcile Bucket Security Controls"
+        env:
+          TF_STATE_BUCKET: ${{ steps.read-bucket.outputs.bucket }}
+        run: |
+          aws s3api wait bucket-exists --bucket "${TF_STATE_BUCKET}"
+
+          aws s3api put-bucket-versioning \
+            --bucket "${TF_STATE_BUCKET}" \
+            --versioning-configuration Status=Enabled
+
+          aws s3api put-bucket-encryption \
+            --bucket "${TF_STATE_BUCKET}" \
+            --server-side-encryption-configuration \
+              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+
+          aws s3api put-public-access-block \
+            --bucket "${TF_STATE_BUCKET}" \
+            --public-access-block-configuration \
+              'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+
+          echo "Reconciled versioning, encryption, and public access block for ${TF_STATE_BUCKET}"
