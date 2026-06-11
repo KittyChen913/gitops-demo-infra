@@ -122,7 +122,9 @@ resource "kubernetes_secret_v1" "argocd_worker_cluster" {
 # ── ArgoCD Self-Managed Application Bootstrap ────────────────────────────────
 # 由 Terraform provider 直接管理 Application，讓 plan 可偵測刪除與 drift。
 resource "kustomization_resource" "argocd_self_app" {
-  manifest = file("${local.manifest_root}/bootstrap/argocd-app.yaml")
+  manifest = jsonencode(yamldecode(
+    file("${local.manifest_root}/bootstrap/argocd-app.yaml")
+  ))
 
   depends_on = [kustomization_resource.argocd_p2]
 }
@@ -134,7 +136,9 @@ resource "kustomization_resource" "argocd_self_app" {
 resource "kustomization_resource" "argocd_root_app" {
   for_each = var.root_app_teams
 
-  manifest = file("${local.manifest_root}/bootstrap/${each.value}")
+  manifest = jsonencode(yamldecode(
+    file("${local.manifest_root}/bootstrap/${each.value}")
+  ))
   depends_on = [
     kubernetes_secret_v1.argocd_worker_cluster,
     kustomization_resource.argocd_self_app,
