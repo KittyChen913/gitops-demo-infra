@@ -57,17 +57,80 @@ jobs:
           environment: ${{ inputs.environment }}
           aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
 
+      - name: "Settle Argo CD install dependencies"
+        id: install-prerequisites
+        if: inputs.stage == 'install'
+        env:
+          TF_IN_AUTOMATION: "true"
+        run: |
+          PREREQUISITE_CHANGED="false"
+          INSTALL_TARGETS=(
+            "module.argocd.kubernetes_namespace_v1.argocd"
+            "module.argocd.kustomization_resource.argocd_p0"
+            "module.argocd.kustomization_resource.argocd_p1"
+          )
+
+          for INDEX in "${!INSTALL_TARGETS[@]}"; do
+            TARGET="${INSTALL_TARGETS[INDEX]}"
+            PLAN_FILE="${RUNNER_TEMP}/tfplan.install-prerequisite-${INDEX}"
+
+            set +e
+            terraform plan \
+              -refresh=false \
+              "-target=${TARGET}" \
+              -out="${PLAN_FILE}" \
+              -no-color \
+              -detailed-exitcode \
+              -input=false \
+              2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
+              | tee "${RUNNER_TEMP}/plan-output.install-prerequisite-${INDEX}.txt"
+            PLAN_EXIT="${PIPESTATUS[0]}"
+            set -e
+
+            if [ "${PLAN_EXIT}" -eq 1 ]; then
+              echo "::error::terraform plan failed for install prerequisite ${TARGET}"
+              exit 1
+            fi
+
+            if [ "${PLAN_EXIT}" -eq 2 ]; then
+              PREREQUISITE_CHANGED="true"
+              set +e
+              terraform apply \
+                -auto-approve \
+                -input=false \
+                -no-color \
+                "${PLAN_FILE}" \
+                2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
+                | tee "${RUNNER_TEMP}/apply-output.install-prerequisite-${INDEX}.txt"
+              APPLY_EXIT="${PIPESTATUS[0]}"
+              set -e
+
+              if [ "${APPLY_EXIT}" -ne 0 ]; then
+                echo "::error::terraform apply failed for install prerequisite ${TARGET}"
+                exit "${APPLY_EXIT}"
+              fi
+            fi
+          done
+
+          echo "changed=${PREREQUISITE_CHANGED}" >> "${GITHUB_OUTPUT}"
+
       - name: "Terraform Plan (${{ inputs.stage }})"
         id: plan
         env:
           DEPLOY_STAGE: ${{ inputs.stage }}
           TF_IN_AUTOMATION: "true"
         run: |
+          REFRESH_ARGS=()
+
           case "${DEPLOY_STAGE}" in
             install)
               TARGET_ARGS=(
                 "-target=module.argocd.kustomization_resource.argocd_p2"
               )
+              # Bootstrap 完成後，這些資源會由 Argo CD 自我管理。
+              # 同步期間可能暫時隱藏 kbst provider 的 live state annotation，
+              # 因此安裝變更應與遠端 Terraform state 比對。
+              REFRESH_ARGS=("-refresh=false")
               ;;
             self-manage)
               TARGET_ARGS=(
@@ -84,6 +147,7 @@ jobs:
           set +e
           terraform plan \
             "${TARGET_ARGS[@]}" \
+            "${REFRESH_ARGS[@]}" \
             -out="${RUNNER_TEMP}/tfplan.${DEPLOY_STAGE}" \
             -no-color \
             -detailed-exitcode \
@@ -102,9 +166,15 @@ jobs:
         if: steps.plan.outputs.exitcode == '0'
         env:
           DEPLOY_STAGE: ${{ inputs.stage }}
+          PREREQUISITE_CHANGED: ${{ steps.install-prerequisites.outputs.changed }}
         run: |
-          echo "No changes detected for ${DEPLOY_STAGE}; skipping apply."
-          echo "## No Changes: \`${DEPLOY_STAGE}\`" >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${PREREQUISITE_CHANGED}" = "true" ]; then
+            echo "Install prerequisites applied; no priority 2 changes detected."
+            echo "## Prerequisites Applied: \`${DEPLOY_STAGE}\`" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "No changes detected for ${DEPLOY_STAGE}; skipping apply."
+            echo "## No Changes: \`${DEPLOY_STAGE}\`" >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: "Terraform Apply (${{ inputs.stage }})"
         id: apply
@@ -135,8 +205,11 @@ jobs:
           DEPLOY_STAGE: ${{ inputs.stage }}
           ENVIRONMENT: ${{ inputs.environment }}
           PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
+          PREREQUISITE_CHANGED: ${{ steps.install-prerequisites.outputs.changed }}
         run: |
-          if [ "${PLAN_EXIT}" = "0" ]; then
+          if [ "${PREREQUISITE_CHANGED}" = "true" ] && [ "${PLAN_EXIT}" = "0" ]; then
+            STATUS="Success"
+          elif [ "${PLAN_EXIT}" = "0" ]; then
             STATUS="No changes"
           elif [ "${APPLY_OUTCOME}" = "success" ]; then
             STATUS="Success"

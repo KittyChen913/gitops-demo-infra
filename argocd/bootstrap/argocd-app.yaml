@@ -1,4 +1,4 @@
-# ArgoCD Self-Managed Application
+# ArgoCD 自我管理 Application
 #
 # 用途：讓 ArgoCD 管理自己的安裝（self-managed / GitOps bootstrap）
 #       首次由 Terraform bootstrap 安裝 ArgoCD 完成後，套用此檔。
@@ -31,6 +31,15 @@ spec:
     targetRevision: master
     path: argocd/install    # 指向含有 kustomization.yaml 的目錄
 
+  # Terraform kbst provider 會將前一版 manifest 儲存在這些 annotations。
+  # Argo CD 接手相同資源的 reconciliation 時必須保留這些內容。
+  ignoreDifferences:
+    - group: "*"
+      kind: "*"
+      jsonPointers:
+        - /metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration
+        - /metadata/annotations/kustomization.kubestack.com~1last-applied-config-gzip
+
   syncPolicy:
     automated:
       prune: true
@@ -38,6 +47,8 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true   # ArgoCD 自身 manifest 較大，建議 server-side apply
+      - ClientSideApplyMigration=false
+      - RespectIgnoreDifferences=true
     retry:
       limit: 5
       backoff:
