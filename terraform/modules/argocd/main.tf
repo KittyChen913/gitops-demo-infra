@@ -134,7 +134,10 @@ resource "kustomization_resource" "argocd_self_app" {
 resource "kustomization_resource" "argocd_root_app" {
   for_each = var.root_app_teams
 
-  manifest   = file("${local.manifest_root}/bootstrap/${each.value}")
-  depends_on = [kustomization_resource.argocd_self_app]
+  manifest = file("${local.manifest_root}/bootstrap/${each.value}")
+  depends_on = [
+    kubernetes_secret_v1.argocd_worker_cluster,
+    kustomization_resource.argocd_self_app,
+  ]
 }
 

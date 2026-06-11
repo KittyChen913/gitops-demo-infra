@@ -42,6 +42,7 @@ on:
       - ".github/workflows/terraform-apply-dev.yml"
       - ".github/workflows/workflow-quality.yml"
       - ".github/workflows/_bootstrap-backend.yml"
+      - ".github/workflows/_terraform-apply-stage.yml"
       - ".github/actions/**"
 
   workflow_dispatch:
@@ -73,7 +74,7 @@ jobs:
   # Job 2: Bootstrap S3 Backend（確保 state bucket 存在）
   # ────────────────────────────────────────────────────────────────────────────
   bootstrap-backend:
-    name: "Bootstrap S3 Backend"
+    name: "1. Verify S3 Backend [dev]"
     needs: quality
     uses: ./.github/workflows/_bootstrap-backend.yml
     with:
@@ -81,136 +82,38 @@ jobs:
     secrets: inherit
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 3: Terraform Apply — Dev
+  # Jobs 3-5: Staged Terraform Apply — Dev
   # ────────────────────────────────────────────────────────────────────────────
-  apply:
-    name: "Apply [dev]"
+  install-argocd:
+    name: "2. Install Argo CD [dev]"
     needs: bootstrap-backend
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/_terraform-apply-stage.yml
+    with:
+      environment: dev
+      stage: install
+    secrets: inherit
 
-    # GitHub Environment "dev"：
-    # - 使用 dev environment 的 protection rules
-    # - 可設定 Deployment branches → master only（避免 feature branch 誤觸發）
-    environment: dev
+  register-argocd-application:
+    name: "3. Register Argo CD Application [dev]"
+    needs: install-argocd
+    uses: ./.github/workflows/_terraform-apply-stage.yml
+    with:
+      environment: dev
+      stage: self-manage
+    secrets: inherit
 
-    defaults:
-      run:
-        working-directory: terraform/argocd/dev
-
-    steps:
-      - name: "Checkout"
-        uses: actions/checkout@v6
-
-      - name: "Validate OIDC prerequisites"
-        env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        run: |
-          if [ -z "${AWS_ACCOUNT_ID}" ]; then
-            echo "::error title=Missing Secret::AWS_ACCOUNT_ID repository secret is not configured"
-            echo "See README.md → CI/CD Configuration"
-            exit 1
-          fi
-          echo "AWS Account ID configured ✓"
-
-      # ── 顯示觸發資訊（Audit Log）───────────────────────────────────────────────────
-      - name: "Log trigger context"
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          ACTOR: ${{ github.actor }}
-          REF_NAME: ${{ github.ref_name }}
-          REASON: ${{ inputs.reason }}
-        run: |
-          echo "=== Dev Apply Trigger Context ==="
-          echo "Event      : ${EVENT_NAME}"
-          echo "Actor      : ${ACTOR}"
-          echo "Branch     : ${REF_NAME}"
-          echo "Commit SHA : ${{ github.sha }}"
-          echo "Run ID     : ${{ github.run_id }}"
-          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
-            echo "Reason     : ${REASON}"
-          fi
-
-      # ── Terraform Setup + AWS OIDC + terraform init ───────────────────────
-      - name: "Terraform Setup (init + AWS auth)"
-        uses: ./.github/actions/tf-setup
-        with:
-          environment: dev
-          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
-
-      # ── Pre-apply Plan ────────────────────────────────────────────────────
-      - name: "Terraform Plan (pre-apply)"
-        id: plan
-        run: |
-          set +e
-          terraform plan \
-            -out="${{ runner.temp }}/tfplan.dev" \
-            -no-color \
-            -detailed-exitcode \
-            -input=false \
-            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
-            | tee "${{ runner.temp }}/plan_output.txt"
-          PLAN_EXIT="${PIPESTATUS[0]}"
-          echo "exitcode=${PLAN_EXIT}" >> "${GITHUB_OUTPUT}"
-
-          if [ "${PLAN_EXIT}" -eq 1 ]; then
-            echo "::error::terraform plan failed"
-            exit 1
-          fi
-        env:
-          TF_IN_AUTOMATION: "true"
-
-      # ── 無變更時跳過 ──────────────────────────────────────────────────────
-      - name: "Skip Apply (no changes)"
-        if: steps.plan.outputs.exitcode == '0'
-        run: |
-          echo "✅ No infrastructure changes — skipping apply"
-          echo "## ✅ No Changes" >> "${GITHUB_STEP_SUMMARY}"
-          echo "Dev infrastructure is already up-to-date." >> "${GITHUB_STEP_SUMMARY}"
-
-      # ── Terraform Apply ───────────────────────────────────────────────────
-      - name: "Terraform Apply"
-        id: apply
-        if: steps.plan.outputs.exitcode == '2'
-        run: |
-          terraform apply \
-            -auto-approve \
-            -input=false \
-            "${{ runner.temp }}/tfplan.dev"
-        env:
-          TF_IN_AUTOMATION: "true"
-
-      # ── Apply Summary ─────────────────────────────────────────────────────
-      - name: "Write Apply Summary"
-        if: steps.plan.outputs.exitcode == '2' && always()
-        env:
-          APPLY_OUTCOME: ${{ steps.apply.outcome }}
-          ACTOR: ${{ github.actor }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          if [ "${APPLY_OUTCOME}" = "success" ]; then
-            STATUS_LABEL="✅ Success"
-          else
-            STATUS_LABEL="❌ Failed"
-          fi
-
-          {
-            echo "## 🟢 Terraform Apply — \`dev\`"
-            echo ""
-            echo "| Field | Value |"
-            echo "|-------|-------|"
-            echo "| Environment | \`dev\` |"
-            echo "| Status | ${STATUS_LABEL} |"
-            echo "| Trigger | \`${{ github.event_name }}\` |"
-            echo "| Actor | @${ACTOR} |"
-            echo "| Branch | \`${REF_NAME}\` |"
-            echo "| Commit | \`${{ github.sha }}\` |"
-            echo "| Timestamp | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
-            echo "| Run | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
-          } >> "${GITHUB_STEP_SUMMARY}"
+  register-ateam-application:
+    name: "4. Register ATeam Application [dev]"
+    needs: register-argocd-application
+    uses: ./.github/workflows/_terraform-apply-stage.yml
+    with:
+      environment: dev
+      stage: ateam
+    secrets: inherit
 
   verify:
     name: "Verify ArgoCD [dev]"
-    needs: apply
+    needs: register-ateam-application
     uses: ./.github/workflows/argo-bootstrap-verify.yml
     with:
       environment: dev

@@ -44,6 +44,7 @@ on:
       - "terraform/**"
       - "argocd/**"
       - ".github/workflows/terraform-*.yml"
+      - ".github/workflows/_terraform-apply-stage.yml"
       - ".github/actions/**"
 
   workflow_dispatch:

@@ -1,0 +1,155 @@
+name: "_Terraform Apply Stage"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (dev | prod)"
+        required: true
+        type: string
+      stage:
+        description: "Deployment stage (install | self-manage | ateam)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apply-stage:
+    name: "${{ inputs.stage }} [${{ inputs.environment }}]"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        working-directory: terraform/argocd/${{ inputs.environment }}
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v6
+
+      - name: "Validate deployment stage"
+        env:
+          DEPLOY_STAGE: ${{ inputs.stage }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          case "${ENVIRONMENT}" in
+            dev|prod) ;;
+            *)
+              echo "::error::Unsupported environment: ${ENVIRONMENT}"
+              exit 1
+              ;;
+          esac
+
+          case "${DEPLOY_STAGE}" in
+            install|self-manage|ateam) ;;
+            *)
+              echo "::error::Unsupported deployment stage: ${DEPLOY_STAGE}"
+              exit 1
+              ;;
+          esac
+
+      - name: "Terraform Setup (init + AWS auth)"
+        uses: ./.github/actions/tf-setup
+        with:
+          environment: ${{ inputs.environment }}
+          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
+
+      - name: "Terraform Plan (${{ inputs.stage }})"
+        id: plan
+        env:
+          DEPLOY_STAGE: ${{ inputs.stage }}
+          TF_IN_AUTOMATION: "true"
+        run: |
+          case "${DEPLOY_STAGE}" in
+            install)
+              TARGET_ARGS=(
+                "-target=module.argocd.kustomization_resource.argocd_p2"
+              )
+              ;;
+            self-manage)
+              TARGET_ARGS=(
+                "-target=module.argocd.kustomization_resource.argocd_self_app"
+              )
+              ;;
+            ateam)
+              TARGET_ARGS=(
+                "-target=module.argocd.kustomization_resource.argocd_root_app"
+              )
+              ;;
+          esac
+
+          set +e
+          terraform plan \
+            "${TARGET_ARGS[@]}" \
+            -out="${RUNNER_TEMP}/tfplan.${DEPLOY_STAGE}" \
+            -no-color \
+            -detailed-exitcode \
+            -input=false \
+            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
+            | tee "${RUNNER_TEMP}/plan-output.${DEPLOY_STAGE}.txt"
+          PLAN_EXIT="${PIPESTATUS[0]}"
+          echo "exitcode=${PLAN_EXIT}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${PLAN_EXIT}" -eq 1 ]; then
+            echo "::error::terraform plan failed for stage ${DEPLOY_STAGE}"
+            exit 1
+          fi
+
+      - name: "Skip Apply (no changes)"
+        if: steps.plan.outputs.exitcode == '0'
+        env:
+          DEPLOY_STAGE: ${{ inputs.stage }}
+        run: |
+          echo "No changes detected for ${DEPLOY_STAGE}; skipping apply."
+          echo "## No Changes: \`${DEPLOY_STAGE}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: "Terraform Apply (${{ inputs.stage }})"
+        id: apply
+        if: steps.plan.outputs.exitcode == '2'
+        env:
+          DEPLOY_STAGE: ${{ inputs.stage }}
+          TF_IN_AUTOMATION: "true"
+        run: |
+          set +e
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            -no-color \
+            "${RUNNER_TEMP}/tfplan.${DEPLOY_STAGE}" \
+            2>&1 | grep -v -iE "^\s*(token|secret|password)\s*=" \
+            | tee "${RUNNER_TEMP}/apply-output.${DEPLOY_STAGE}.txt"
+          APPLY_EXIT="${PIPESTATUS[0]}"
+
+          if [ "${APPLY_EXIT}" -ne 0 ]; then
+            echo "::error::terraform apply failed for stage ${DEPLOY_STAGE}"
+            exit "${APPLY_EXIT}"
+          fi
+
+      - name: "Write stage summary"
+        if: always()
+        env:
+          APPLY_OUTCOME: ${{ steps.apply.outcome }}
+          DEPLOY_STAGE: ${{ inputs.stage }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
+        run: |
+          if [ "${PLAN_EXIT}" = "0" ]; then
+            STATUS="No changes"
+          elif [ "${APPLY_OUTCOME}" = "success" ]; then
+            STATUS="Success"
+          else
+            STATUS="Failed"
+          fi
+
+          {
+            echo "## Terraform Stage: \`${DEPLOY_STAGE}\`"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Environment | \`${ENVIRONMENT}\` |"
+            echo "| Status | ${STATUS} |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
