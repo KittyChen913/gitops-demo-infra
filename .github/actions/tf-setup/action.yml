@@ -40,7 +40,8 @@ runs:
       uses: hashicorp/setup-terraform@v4
       with:
         terraform_version: ${{ inputs.terraform-version }}
-        terraform_wrapper: true
+        # Workflows handle Terraform's 0/1/2 exit codes directly.
+        terraform_wrapper: false
 
     # ── 2. AWS OIDC Authentication ────────────────────────────────────────────
     # 透過 configure-aws-credentials composite action 取得暫時 AWS credentials。
