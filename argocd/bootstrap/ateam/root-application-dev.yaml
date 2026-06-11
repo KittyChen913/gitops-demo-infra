@@ -1,4 +1,4 @@
-# Root Application - Dev (App of Apps)
+# Dev Root Application（App of Apps）
 #
 # 用途：GitOps 入口點（開發環境）— 管理 gitops-demo-apps
 #       倉庫中 argocd/applicationsets/gitops-demo-dev.yaml 定義的 ApplicationSet。

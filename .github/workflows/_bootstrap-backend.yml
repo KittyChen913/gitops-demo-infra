@@ -9,7 +9,7 @@
 #   - Bucket 名稱從 terraform/argocd/<environment>/backend.tf 讀取
 #
 # 流程：
-#   1. Configure AWS via OIDC
+#   1. 透過 OIDC 設定 AWS credentials
 #   2. 從環境專屬 backend HCL 讀取 bucket 名稱
 #   3. 確認 S3 bucket 存在、可存取且由目前 AWS 帳號擁有
 #   4. 每次執行都校正 versioning、encryption 與 public access block

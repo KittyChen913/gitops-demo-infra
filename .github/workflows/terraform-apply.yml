@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Terraform Apply — Manual Override (Emergency Use)
+# Terraform Apply - 緊急手動 Override
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # ⚠️  此 workflow 為緊急手動入口，正常部署流程請使用：
@@ -20,9 +20,9 @@
 #   5. verify            ── 呼叫並等待 ArgoCD bootstrap 驗證
 #
 # ┌─────────────────────────────────────────────────────────────────────────┐
-# │  TRIGGER DESIGN（此檔案）                                                │
-# │  ❌ NO push: branches   ← 禁用，防止與 dev/prod 專屬 workflow 衝突       │
-# │  ❌ NO push: tags       ← 禁用，prod tag trigger 在 prod workflow       │
+# │  觸發設計（此檔案）                                                      │
+# │  ❌ 不使用 push: branches ← 避免與 dev/prod 專屬 workflow 衝突           │
+# │  ❌ 不使用 push: tags     ← prod tag 由 prod workflow 處理               │
 # │  ✅ workflow_dispatch   ← 僅允許手動觸發（緊急使用）                      │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
@@ -62,7 +62,7 @@ concurrency:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 1: 決定 apply 目標 environment
+  # Job 1：決定 apply 目標 environment
   # ────────────────────────────────────────────────────────────────────────────
   determine-env:
     name: "Determine Target Environment"
@@ -99,7 +99,7 @@ jobs:
           echo "Manual dispatch — target: ${INPUT_ENV}"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 2: Production 部署安全護欄
+  # Job 2：Prod 部署安全護欄
   # 只在目標為 prod 時執行，驗證確認字串
   # ────────────────────────────────────────────────────────────────────────────
   guard-prod:
@@ -127,7 +127,7 @@ jobs:
           echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Jobs 3-6: Backend and staged Terraform apply
+  # Jobs 3-6：Backend 與分階段 Terraform Apply
   # ────────────────────────────────────────────────────────────────────────────
   bootstrap-backend:
     name: "1. Verify S3 Backend [${{ matrix.environment }}]"

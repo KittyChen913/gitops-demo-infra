@@ -1,9 +1,9 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Terraform Apply — Prod Environment Pipeline
+# Terraform Apply - prod 環境 Pipeline
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # ⚠️  此 workflow 僅用於 PROD 環境，與 dev 完全隔離。
-#     Dev 環境請見 terraform-apply-dev.yml（push to master trigger）
+#     Dev 環境請見 terraform-apply-dev.yml（push 至 master 時觸發）
 #
 # 觸發時機：
 #   push tag 符合語意化版本格式（v*.*.*），例如：
@@ -11,23 +11,23 @@
 #   - v1.2.3  ← minor / patch 更新
 #
 # ⛔  禁止事項：
-#   - 此 workflow 不得使用 push: branches trigger
+#   - 此 workflow 不得使用 `push: branches` 觸發
 #   - 不得在 PR / commit push 時自動觸發
 #   - 不得移除 GitHub Environment 的 required reviewer 設定
 #
 # ✅  安全設計：
-#   1. Tag-based trigger → 強制版本審核才能觸發
+#   1. 以 tag 觸發 → 強制版本審核後才能觸發
 #   2. GitHub Environment "prod" → required reviewer 人工核准（必須在 UI 設定）
-#   3. Semantic version tag validation → 格式不符直接 fail
-#   4. 雙重確認：tag pattern check + environment protection rule
-#   5. AWS credentials 透過 OIDC（無 stored key）
+#   3. SemVer tag 驗證 → 格式不符直接失敗
+#   4. 雙重確認：tag 格式檢查與 Environment protection rule
+#   5. AWS credentials 透過 OIDC 取得（不儲存 key）
 #   6. concurrency lock 防止同時兩個 prod apply 執行
 #
 # ┌─────────────────────────────────────────────────────────────────────────┐
-# │  TRIGGER DESIGN                                                         │
+# │  觸發設計                                                               │
 # │  push: tags: ["v*.*.*"]  ← prod 只能透過 tag release 觸發                │
-# │  ❌ NO push: branches    ← 嚴禁，防止 accidental prod deploy            │
-# │  ✅ GitHub Environment   ← required reviewer 人工 approval gate         │
+# │  ❌ 不使用 push: branches ← 嚴禁，避免意外部署 prod                     │
+# │  ✅ GitHub Environment   ← required reviewer 人工核准關卡               │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
 # 上線流程：
@@ -60,7 +60,7 @@ concurrency:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 1: Semantic Version Tag Validation
+  # Job 1：SemVer Tag 驗證
   # 確保 tag 格式為合法的語意化版本，防止非規範 tag 誤觸發
   # ────────────────────────────────────────────────────────────────────────────
   validate-tag:
@@ -137,7 +137,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 2: Bootstrap S3 Backend（確保 state bucket 存在）
+  # Job 2：Bootstrap S3 Backend（確保 state bucket 存在）
   # tag 驗證過後才執行，避免無效 tag 浪費資源
   # ────────────────────────────────────────────────────────────────────────────
   bootstrap-backend:
@@ -149,7 +149,7 @@ jobs:
     secrets: inherit
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Jobs 3-5: Staged Terraform Apply — Prod
+  # Jobs 3-5：分階段執行 prod Terraform Apply
   #
   # 此 job 使用 GitHub Environment "prod"，執行前 GitHub 會：
   #   1. 檢查 required reviewer 設定（必須在 UI 設定，否則此為安全漏洞）
@@ -157,7 +157,7 @@ jobs:
   #   3. 核准後才繼續執行
   #
   # ⚠️  UI 設定提醒：
-  #   Settings → Environments → prod → Protection rules
+  #   設定路徑：Settings → Environments → prod → Protection rules
   #   ✅ Required reviewers（至少 1 人）
   #   ✅ Deployment branches → Tags matching v*
   # ────────────────────────────────────────────────────────────────────────────

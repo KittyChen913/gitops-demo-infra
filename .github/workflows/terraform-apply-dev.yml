@@ -1,27 +1,27 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Terraform Apply — Dev Environment Pipeline
+# Terraform Apply - dev 環境 Pipeline
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # ⚠️  此 workflow 僅用於 DEV 環境，與 prod 完全隔離。
-#     Prod 環境請見 terraform-apply-prod.yml（tag-based trigger）
+#     Prod 環境請見 terraform-apply-prod.yml（以 tag 觸發）
 #
 # 觸發時機：
-#   push to master，且異動路徑命中基礎設施相關檔案
+#   Push 至 master，且異動路徑命中基礎設施相關檔案
 #   （docs/README/Markdown 等文件變更不觸發此 pipeline）
 #
 # 設計原則：
-#   - 每次 commit to master 皆可自動觸發（frequent execution）
+#   - 每次 commit 至 master 皆可自動觸發（高頻執行）
 #   - 只 apply dev，不接觸 prod 任何資源
 #   - paths allowlist（allowlist > denylist，明確比例外安全）
 #     等效效果：排除 *.md、docs/、README.md 等純文件變更
-#   - AWS credentials 透過 OIDC（無 stored key）
-#   - GitHub Environment "dev" 可加 branch protection（限 master only）
+#   - AWS credentials 透過 OIDC 取得（不儲存 key）
+#   - GitHub Environment `dev` 可加 branch protection（僅限 master）
 #
 # ┌─────────────────────────────────────────────────────────────────────────┐
-# │  TRIGGER DESIGN                                                         │
+# │  觸發設計                                                               │
 # │  push: branches: [master]  ← dev 允許頻繁觸發                          │
 # │  paths: allowlist        ← 只有基礎設施變更才觸發（排除 docs/md）       │
-# │  workflow_dispatch       ← 手動補跑（dev only）                        │
+# │  workflow_dispatch       ← 手動補跑（僅限 dev）                        │
 # └─────────────────────────────────────────────────────────────────────────┘
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -64,14 +64,14 @@ concurrency:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 1: Workflow / Script Quality Gate
+  # Job 1：Workflow 與 Script 品質檢查
   # ────────────────────────────────────────────────────────────────────────────
   quality:
     name: "Workflow Quality"
     uses: ./.github/workflows/workflow-quality.yml
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 2: Bootstrap S3 Backend（確保 state bucket 存在）
+  # Job 2：Bootstrap S3 Backend（確保 state bucket 存在）
   # ────────────────────────────────────────────────────────────────────────────
   bootstrap-backend:
     name: "1. Verify S3 Backend [dev]"
@@ -82,7 +82,7 @@ jobs:
     secrets: inherit
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Jobs 3-5: Staged Terraform Apply — Dev
+  # Jobs 3-5：分階段執行 dev Terraform Apply
   # ────────────────────────────────────────────────────────────────────────────
   install-argocd:
     name: "2. Install Argo CD [dev]"

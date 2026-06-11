@@ -1,7 +1,7 @@
-# Composite Action: Terraform Setup
+# Composite Action：Terraform 設定
 #
 # 用途：統一處理所有 Terraform 執行前的準備步驟：
-#   1. Setup Terraform binary
+#   1. 安裝 Terraform binary
 #   2. AWS OIDC 認證（無需 stored access key）
 #   3. terraform init（S3 remote backend）
 #
@@ -35,15 +35,15 @@ outputs:
 runs:
   using: "composite"
   steps:
-    # ── 1. Setup Terraform ────────────────────────────────────────────────────
+    # ── 1. 安裝 Terraform ─────────────────────────────────────────────────────
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v4
       with:
         terraform_version: ${{ inputs.terraform-version }}
-        # Workflows handle Terraform's 0/1/2 exit codes directly.
+        # Terraform 的 0/1/2 exit code 由 workflows 直接處理。
         terraform_wrapper: false
 
-    # ── 2. AWS OIDC Authentication ────────────────────────────────────────────
+    # ── 2. AWS OIDC 驗證 ──────────────────────────────────────────────────────
     # 透過 configure-aws-credentials composite action 取得暫時 AWS credentials。
     # IAM Role 名稱格式：github-oidc-gitops-demo-infra-role
     # Account ID 儲存為 Repository Secret。

@@ -1,14 +1,14 @@
-# OS
+# 作業系統
 .DS_Store
 Thumbs.db
 
-# Editor
+# 編輯器
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# Kubernetes / Secrets
+# Kubernetes 與 Secrets
 kubeconfig
 *.kubeconfig
 *-secret.yaml
@@ -19,11 +19,11 @@ secrets/
 charts/*/charts/
 charts/*/tmpcharts/
 
-# Logs & temp
+# Log 與暫存檔
 *.log
 *.tmp
 
-# Local environment files
+# 本地環境檔案
 .env
 .env.*
 !.env.example

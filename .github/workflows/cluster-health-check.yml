@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Cluster Health Check — Scheduled + On-Demand
+# Cluster Health Check - 排程與手動執行
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # 觸發方式：
@@ -66,12 +66,12 @@ jobs:
               echo "matrix={\"environment\":[\"${INPUT_ENV}\"]}" >> "${GITHUB_OUTPUT}"
             fi
           else
-            # Scheduled: 同時檢查所有 environments
+            # 排程執行時同時檢查所有 environments
             echo 'matrix={"environment":["dev","prod"]}' >> "${GITHUB_OUTPUT}"
           fi
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 2: Health Check（每個 environment 獨立執行）
+  # Job 2：Health Check（每個 environment 獨立執行）
   # ────────────────────────────────────────────────────────────────────────────
   health-check:
     name: "Health Check [${{ matrix.environment }}]"
@@ -124,7 +124,7 @@ jobs:
             --with-decryption \
             --query "Parameter.Value" --output text)"
 
-          # Mask in logs
+          # 遮罩 log 中的敏感值
           echo "::add-mask::${TOKEN}"
           echo "::add-mask::${CA_CERT}"
 
@@ -177,7 +177,7 @@ jobs:
           path: "${{ runner.temp }}/health-report-${{ matrix.environment }}.txt"
           retention-days: 30
 
-      # ── Scheduled 失敗時自動開 GitHub Issue ──────────────────────────────
+      # ── 排程執行失敗時自動建立 GitHub Issue ──────────────────────────────
       - name: "Create GitHub Issue on Failure (scheduled only)"
         if: failure() && github.event_name == 'schedule'
         uses: actions/github-script@v7
@@ -212,7 +212,7 @@ jobs:
               }
             }
 
-            // Check for existing open issue with same labels to avoid duplicates
+            // 檢查是否已有相同 labels 的 open issue，避免重複建立
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -243,7 +243,7 @@ jobs:
                 labels,
               });
             } else {
-              // Append update to existing issue
+              // 將最新狀態附加至既有 issue
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -288,7 +288,7 @@ jobs:
             shred -u "${KUBECONFIG_FILE}" 2>/dev/null || rm -f "${KUBECONFIG_FILE}"
           fi
 
-      # ── Summary ───────────────────────────────────────────────────────────
+      # ── 摘要 ──────────────────────────────────────────────────────────────
       - name: "Write Health Check Summary"
         if: always()
         run: |

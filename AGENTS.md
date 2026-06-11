@@ -22,6 +22,13 @@
 - `scripts/`：CI 輔助腳本。
 - `docs/`：CI/CD 與設定文件。
 
+## 註解撰寫規範
+
+- 人工維護的程式碼、Terraform、GitHub Actions、腳本、manifest 與設定檔註解必須使用繁體中文。
+- 專有名詞、產品名稱、API、資源種類、欄位名稱、命令、路徑、識別字與無適當中文譯名的技術術語可保留英文。
+- 不得以完整英文句子撰寫註解；英文專有名詞應放在中文敘述中。
+- 自動生成檔案（例如 `.terraform.lock.hcl`）的生成器註解不得手動修改。
+
 ## Terraform 規則
 
 - 不得在 provider block 中寫死 AWS region，必須使用 `var.aws_region`。

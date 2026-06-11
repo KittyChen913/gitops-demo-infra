@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# ArgoCD Bootstrap Verification
+# ArgoCD Bootstrap 驗證
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # 觸發方式：
@@ -102,11 +102,11 @@ jobs:
             --with-decryption \
             --query "Parameter.Value" --output text)"
 
-          # Mask sensitive values in all subsequent log output
+          # 遮罩後續所有 log output 中的敏感值
           echo "::add-mask::${TOKEN}"
           echo "::add-mask::${CA_CERT}"
 
-          # Write kubeconfig to a temp file with restricted permissions (never in $GITHUB_WORKSPACE)
+          # 將 kubeconfig 寫入權限受限的暫存檔，且不得放在 $GITHUB_WORKSPACE
           KUBECONFIG_FILE="$(mktemp /tmp/kubeconfig-XXXXXX)"
           chmod 600 "${KUBECONFIG_FILE}"
 
@@ -176,12 +176,12 @@ jobs:
         run: |
           echo "=== ArgoCD API Health Check ==="
 
-          # Port-forward argocd-server for API probing
+          # 對 argocd-server 建立 port-forward 以探測 API
           kubectl port-forward svc/argocd-server -n argocd 8080:443 &
           PF_PID=$!
           echo "PF_PID=${PF_PID}" >> "${GITHUB_ENV}"
 
-          # Wait for port-forward to be ready
+          # 等待 port-forward 就緒
           for _ in $(seq 1 10); do
             sleep 2
             if curl -sk --connect-timeout 2 https://localhost:8080/healthz > /dev/null 2>&1; then
@@ -325,18 +325,18 @@ jobs:
       - name: "Cleanup sensitive files"
         if: always()
         run: |
-          # Stop port-forward
+          # 停止 port-forward
           if [ -n "${PF_PID}" ]; then
             kill "${PF_PID}" 2>/dev/null || true
           fi
 
-          # Securely wipe kubeconfig
+          # 安全清除 kubeconfig
           if [ -n "${KUBECONFIG_FILE}" ] && [ -f "${KUBECONFIG_FILE}" ]; then
             shred -u "${KUBECONFIG_FILE}" 2>/dev/null || rm -f "${KUBECONFIG_FILE}"
             echo "Kubeconfig file securely removed"
           fi
 
-      # ── Summary ───────────────────────────────────────────────────────────
+      # ── 摘要 ──────────────────────────────────────────────────────────────
       - name: "Write Verification Summary"
         if: always()
         env:

@@ -45,7 +45,7 @@ echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "KUBECONFIG: ${KUBECONFIG:-<not set>}"
 echo ""
 
-# ── 1. Kubernetes API Server ──────────────────────────────────────────────────
+# ── 1. Kubernetes API Server 檢查 ─────────────────────────────────────────────
 header "1. Kubernetes API Server"
 
 if kubectl cluster-info --request-timeout=10s > /dev/null 2>&1; then
@@ -56,7 +56,7 @@ else
   fail "API server unreachable (request timed out or refused)"
 fi
 
-# ── 2. Node Readiness ─────────────────────────────────────────────────────────
+# ── 2. Node 就緒狀態 ──────────────────────────────────────────────────────────
 header "2. Node Readiness"
 
 TOTAL_NODES="$(kubectl get nodes --no-headers 2>/dev/null | wc -l || echo 0)"
@@ -77,7 +77,7 @@ else
   pass "${READY_NODES}/${TOTAL_NODES} nodes are Ready"
 fi
 
-# ── 3. System Pods Health (kube-system) ───────────────────────────────────────
+# ── 3. System Pods 健康狀態（kube-system）─────────────────────────────────────
 header "3. System Pods Health (kube-system)"
 
 SYSTEM_TOTAL="$(kubectl get pods -n kube-system --no-headers 2>/dev/null | wc -l || echo 0)"
@@ -99,7 +99,7 @@ else
   pass "System pods healthy (${SYSTEM_RUNNING}/${SYSTEM_TOTAL} Running)"
 fi
 
-# ── 4. ArgoCD Pods Health ─────────────────────────────────────────────────────
+# ── 4. ArgoCD Pods 健康狀態 ───────────────────────────────────────────────────
 header "4. ArgoCD Pods Health (argocd namespace)"
 
 if ! kubectl get namespace argocd > /dev/null 2>&1; then
@@ -125,7 +125,7 @@ else
   fi
 fi
 
-# ── 5. ArgoCD Applications Status ────────────────────────────────────────────
+# ── 5. ArgoCD Applications 狀態 ───────────────────────────────────────────────
 header "5. ArgoCD Applications Status"
 
 if ! kubectl get crd applications.argoproj.io > /dev/null 2>&1; then
@@ -158,7 +158,7 @@ else
   fi
 fi
 
-# ── 6. Worker Cluster Registration ────────────────────────────────────────────
+# ── 6. Worker Cluster 註冊狀態 ────────────────────────────────────────────────
 header "6. Worker Cluster Registration"
 
 if ! kubectl get crd applications.argoproj.io > /dev/null 2>&1; then
@@ -176,7 +176,7 @@ else
     -o custom-columns="SECRET:.metadata.name,CREATED:.metadata.creationTimestamp" \
     --no-headers 2>/dev/null | awk '{print "  "$0}' || true
 
-  # Check if the expected worker cluster secret exists
+  # 檢查預期的 worker cluster Secret 是否存在
   if kubectl get secret "cluster-${WORKER_LABEL}" -n argocd > /dev/null 2>&1; then
     pass "Worker cluster 'cluster-${WORKER_LABEL}' is registered in ArgoCD"
   else
@@ -185,7 +185,7 @@ else
 fi
 
 # ==============================================================================
-# Summary
+# 摘要
 # ==============================================================================
 echo ""
 echo "══════════════════════════════════════════════"

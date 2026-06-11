@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Terraform Plan — PR Validation Pipeline
+# Terraform Plan - PR 驗證 Pipeline
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # 觸發時機：Pull Request 對 master 且命中 infra paths，或手動選擇環境
@@ -13,12 +13,12 @@
 #   6. 若有變更，上傳 plan artifact（供審閱與除錯保留）
 #
 # ┌─────────────────────────────────────────────────────────────────────────┐
-# │  DOCS CHANGE HANDLING                                                   │
+# │  文件變更處理                                                           │
 # │  此 workflow 使用 paths allowlist，以下變更不會觸發此 pipeline：           │
 # │    ✅ *.md / README.md     → 不在 paths allowlist 中                    │
 # │    ✅ docs/**              → 不在 paths allowlist 中                    │
 # │    ✅ diagram assets       → 不在 paths allowlist 中                    │
-# │  NOTE: GitHub Actions 不允許同一 event 同時使用 paths 和 paths-ignore，   │
+# │  注意：GitHub Actions 不允許同一 event 同時使用 paths 和 paths-ignore，   │
 # │  此處以 paths allowlist 實現等效的 docs-ignore 效果，且更安全（明確範圍）   │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
@@ -69,7 +69,7 @@ concurrency:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 1: 偵測目標 environment
+  # Job 1：偵測目標 environment
   # 透過 PR label 決定要 plan 哪個 environment
   # ────────────────────────────────────────────────────────────────────────────
   detect-environment:
@@ -129,7 +129,7 @@ jobs:
           fi
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 2: Terraform Plan（matrix: 每個 environment 獨立執行）
+  # Job 2：Terraform Plan（matrix：每個 environment 獨立執行）
   # ────────────────────────────────────────────────────────────────────────────
   plan:
     name: "Plan [${{ matrix.environment }}]"
@@ -157,7 +157,7 @@ jobs:
           environment: ${{ matrix.environment }}
           aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
 
-      # ── fmt check ──────────────────────────────────────────────────────────
+      # ── fmt 檢查 ───────────────────────────────────────────────────────────
       - name: "Terraform Format Check"
         id: fmt
         run: terraform fmt -check -recursive -diff "${GITHUB_WORKSPACE}/terraform"
@@ -195,7 +195,7 @@ jobs:
             exit 1
           fi
 
-      # ── Upload plan artifact（僅在有變更時上傳）───────────────────────────
+      # ── 上傳 plan artifact（僅在有變更時上傳）─────────────────────────────
       # artifact 供審閱與除錯保留；apply workflows 會在部署前重新產生 plan
       - name: "Upload Plan Artifact"
         if: steps.plan.outputs.exitcode == '2'
@@ -206,7 +206,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      # ── Post plan result to PR comment ────────────────────────────────────
+      # ── 將 plan 結果發佈至 PR comment ─────────────────────────────────────
       - name: "Post Plan Summary to PR"
         uses: actions/github-script@v7
         if: always() && github.event_name == 'pull_request'
@@ -230,7 +230,7 @@ jobs:
             else if (exit === '2') planBadge = '⚠️ Changes detected — review before applying';
             else                   planBadge = '❌ Plan failed — check the Actions log';
 
-            // Truncate at 60 KB to stay under GitHub comment size limit
+            // 截斷至 60 KB 以符合 GitHub comment 大小限制
             const MAX = 60_000;
             const safePlan = planOutput.length > MAX
               ? planOutput.slice(0, MAX) + '\n\n…(truncated — see full output in Actions run)'

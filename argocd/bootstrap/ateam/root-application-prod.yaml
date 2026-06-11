@@ -1,4 +1,4 @@
-# Root Application - Prod (App of Apps)
+# Prod Root Application（App of Apps）
 #
 # 用途：GitOps 入口點（生產環境）— 管理 gitops-demo-apps
 #       倉庫中 argocd/applicationsets/gitops-demo-prod.yaml 定義的 ApplicationSet。
