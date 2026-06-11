@@ -77,18 +77,33 @@ resource "kustomization_resource" "argocd_p0" {
   for_each   = data.kustomization_build.argocd_install.ids_prio[0]
   manifest   = data.kustomization_build.argocd_install.manifests[each.value]
   depends_on = [kubernetes_namespace_v1.argocd]
+
+  lifecycle {
+    # 首次 bootstrap 後由 Argo CD 接手 install manifests 的 reconciliation。
+    ignore_changes = [manifest]
+  }
 }
 
 resource "kustomization_resource" "argocd_p1" {
   for_each   = data.kustomization_build.argocd_install.ids_prio[1]
   manifest   = data.kustomization_build.argocd_install.manifests[each.value]
   depends_on = [kustomization_resource.argocd_p0]
+
+  lifecycle {
+    # 避免 kbst provider 以缺失的 last-applied annotation 更新既有資源。
+    ignore_changes = [manifest]
+  }
 }
 
 resource "kustomization_resource" "argocd_p2" {
   for_each   = data.kustomization_build.argocd_install.ids_prio[2]
   manifest   = data.kustomization_build.argocd_install.manifests[each.value]
   depends_on = [kustomization_resource.argocd_p1]
+
+  lifecycle {
+    # 後續升級與 drift 修復由 self-managed Argo CD Application 負責。
+    ignore_changes = [manifest]
+  }
 }
 
 # ── ArgoCD Cluster Secret（Worker Cluster 註冊）────────────────────────────────
@@ -115,8 +130,6 @@ resource "kubernetes_secret_v1" "argocd_worker_cluster" {
       }
     })
   }
-
-  depends_on = [kustomization_resource.argocd_p2]
 }
 
 # ── ArgoCD Self-Managed Application Bootstrap ────────────────────────────────
@@ -125,8 +138,6 @@ resource "kustomization_resource" "argocd_self_app" {
   manifest = jsonencode(yamldecode(
     file("${local.manifest_root}/bootstrap/argocd-app.yaml")
   ))
-
-  depends_on = [kustomization_resource.argocd_p2]
 }
 
 # ── Root Application Bootstrap（環境入口點）────────────────────────────────────
@@ -144,4 +155,3 @@ resource "kustomization_resource" "argocd_root_app" {
     kustomization_resource.argocd_self_app,
   ]
 }
-

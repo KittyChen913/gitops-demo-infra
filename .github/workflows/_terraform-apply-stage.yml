@@ -127,9 +127,8 @@ jobs:
               TARGET_ARGS=(
                 "-target=module.argocd.kustomization_resource.argocd_p2"
               )
-              # Bootstrap 完成後，這些資源會由 Argo CD 自我管理。
-              # 同步期間可能暫時隱藏 kbst provider 的 live state annotation，
-              # 因此安裝變更應與遠端 Terraform state 比對。
+              # Install resources 已交由 Argo CD 管理，避免 refresh 讀取
+              # kbst provider 缺失的 last-applied annotation。
               REFRESH_ARGS=("-refresh=false")
               ;;
             self-manage)

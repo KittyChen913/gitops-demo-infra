@@ -172,6 +172,7 @@ jobs:
 
       # ── plan ───────────────────────────────────────────────────────────────
       # -detailed-exitcode: 0=no-change, 1=error, 2=changes-present
+      # Install resources 由 Argo CD 自我管理，因此不 refresh kbst live state。
       # plan artifact 儲存在 $RUNNER_TEMP（不在 working-dir）避免意外提交
       - name: "Terraform Plan"
         id: plan
@@ -181,6 +182,7 @@ jobs:
         run: |
           set +e
           terraform plan \
+            -refresh=false \
             -out="${{ runner.temp }}/tfplan.${ENVIRONMENT}" \
             -no-color \
             -detailed-exitcode \
