@@ -58,7 +58,6 @@ jobs:
         uses: ./.github/actions/configure-aws-credentials
         with:
           aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws-region: ap-southeast-1
 
       # ── 安裝工具 ──────────────────────────────────────────────────────────
       - name: "Install kubectl"
@@ -73,16 +72,19 @@ jobs:
         env:
           ENVIRONMENT: ${{ inputs.environment }}
         run: |
-          # 依 environment 決定 SSM 路徑與 cluster labels
-          if [ "${ENVIRONMENT}" = "prod" ]; then
-            SSM_PREFIX="${{ vars.SSM_PREFIX }}"
-            MGMT_LABEL="${{ vars.MGMT_CLUSTER }}"
-            WORKER_LABEL="${{ vars.WORKER_CLUSTER }}"
-          else
-            SSM_PREFIX="${{ vars.SSM_PREFIX }}"
-            MGMT_LABEL="${{ vars.MGMT_CLUSTER }}"
-            WORKER_LABEL="${{ vars.WORKER_CLUSTER }}"
-          fi
+          case "${ENVIRONMENT}" in
+            dev|prod) ;;
+            *)
+              echo "::error::Unsupported environment: ${ENVIRONMENT}"
+              exit 1
+              ;;
+          esac
+
+          # 與 Terraform root 共用受版控的 environment 設定
+          CONFIG_FILE="terraform/argocd/environments/${ENVIRONMENT}.json"
+          SSM_PREFIX="$(jq -er '.ssm_path_prefix' "${CONFIG_FILE}")"
+          MGMT_LABEL="$(jq -er '.mgmt_cluster_label' "${CONFIG_FILE}")"
+          WORKER_LABEL="$(jq -er '.worker_cluster_label' "${CONFIG_FILE}")"
 
           echo "mgmt_label=${MGMT_LABEL}" >> "${GITHUB_OUTPUT}"
           echo "worker_label=${WORKER_LABEL}" >> "${GITHUB_OUTPUT}"
@@ -254,47 +256,67 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
         run: |
           echo "=== Root Application Bootstrap Check ==="
-          ROOT_APP="root-application-${ENVIRONMENT}"
+          case "${ENVIRONMENT}" in
+            dev|prod) ;;
+            *)
+              echo "::error::Unsupported environment: ${ENVIRONMENT}"
+              exit 1
+              ;;
+          esac
 
-          for _ in $(seq 1 30); do
-            if kubectl get application "${ROOT_APP}" -n argocd -o name >/dev/null 2>&1; then
-              break
-            fi
-            echo "Waiting for Application/${ROOT_APP}..."
-            sleep 10
-          done
+          CONFIG_FILE="terraform/argocd/environments/${ENVIRONMENT}.json"
+          mapfile -t ROOT_APPS < <(
+            jq -er '.root_applications | to_entries[] | .value.name' "${CONFIG_FILE}"
+          )
 
-          if ! kubectl get application "${ROOT_APP}" -n argocd -o name >/dev/null 2>&1; then
-            echo "::error::Application '${ROOT_APP}' was not created"
-            kubectl get applications -n argocd --no-headers 2>/dev/null || true
+          if [ "${#ROOT_APPS[@]}" -eq 0 ]; then
+            echo "::error::No Root Applications configured in ${CONFIG_FILE}"
             exit 1
           fi
 
-          for _ in $(seq 1 30); do
-            SYNC="$(kubectl get application "${ROOT_APP}" -n argocd \
-              -o jsonpath='{.status.sync.status}' 2>/dev/null || echo 'Unknown')"
-            HEALTH="$(kubectl get application "${ROOT_APP}" -n argocd \
-              -o jsonpath='{.status.health.status}' 2>/dev/null || echo 'Unknown')"
-            SOURCE="$(kubectl get application "${ROOT_APP}" -n argocd \
-              -o jsonpath='{.spec.source.repoURL}' 2>/dev/null || echo 'Unknown')"
+          for ROOT_APP in "${ROOT_APPS[@]}"; do
+            for _ in $(seq 1 30); do
+              if kubectl get application "${ROOT_APP}" -n argocd -o name >/dev/null 2>&1; then
+                break
+              fi
+              echo "Waiting for Application/${ROOT_APP}..."
+              sleep 10
+            done
 
-            echo "  App:    ${ROOT_APP}"
-            echo "  Sync:   ${SYNC}"
-            echo "  Health: ${HEALTH}"
-            echo "  Source: ${SOURCE}"
-
-            if [ "${SYNC}" = "Synced" ] && [ "${HEALTH}" = "Healthy" ]; then
-              echo "✅ Root Application is Synced"
-              break
+            if ! kubectl get application "${ROOT_APP}" -n argocd -o name >/dev/null 2>&1; then
+              echo "::error::Application '${ROOT_APP}' was not created"
+              kubectl get applications -n argocd --no-headers 2>/dev/null || true
+              exit 1
             fi
-            echo "Waiting for Application/${ROOT_APP}: sync=${SYNC}, health=${HEALTH}"
-            sleep 10
-          done
 
-          if [ "${SYNC}" != "Synced" ] || [ "${HEALTH}" != "Healthy" ]; then
-            echo "::error::Root Application did not become Synced + Healthy: sync=${SYNC}, health=${HEALTH}"
-            exit 1
-          fi
+            SYNC="Unknown"
+            HEALTH="Unknown"
+            for _ in $(seq 1 30); do
+              SYNC="$(kubectl get application "${ROOT_APP}" -n argocd \
+                -o jsonpath='{.status.sync.status}' 2>/dev/null || echo 'Unknown')"
+              HEALTH="$(kubectl get application "${ROOT_APP}" -n argocd \
+                -o jsonpath='{.status.health.status}' 2>/dev/null || echo 'Unknown')"
+              SOURCE="$(kubectl get application "${ROOT_APP}" -n argocd \
+                -o jsonpath='{.spec.source.repoURL}' 2>/dev/null || echo 'Unknown')"
+
+              echo "  App:    ${ROOT_APP}"
+              echo "  Sync:   ${SYNC}"
+              echo "  Health: ${HEALTH}"
+              echo "  Source: ${SOURCE}"
+
+              if [ "${SYNC}" = "Synced" ] && [ "${HEALTH}" = "Healthy" ]; then
+                echo "✅ Root Application ${ROOT_APP} is Synced + Healthy"
+                break
+              fi
+              echo "Waiting for Application/${ROOT_APP}: sync=${SYNC}, health=${HEALTH}"
+              sleep 10
+            done
+
+            if [ "${SYNC}" != "Synced" ] || [ "${HEALTH}" != "Healthy" ]; then
+              echo "::error::Root Application ${ROOT_APP} did not become Synced + Healthy: sync=${SYNC}, health=${HEALTH}"
+              exit 1
+            fi
+          done
 
       # ── 6. Worker cluster registration ───────────────────────────────────
       - name: "6 — Worker cluster registration"

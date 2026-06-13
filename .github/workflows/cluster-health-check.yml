@@ -92,7 +92,6 @@ jobs:
         uses: ./.github/actions/configure-aws-credentials
         with:
           aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws-region: ap-southeast-1
 
       # ── 安裝 kubectl ──────────────────────────────────────────────────────
       - name: "Install kubectl"
@@ -103,10 +102,22 @@ jobs:
       # ── 從 SSM 取得叢集憑證 ───────────────────────────────────────────────
       - name: "Fetch cluster credentials from SSM"
         id: fetch-creds
+        env:
+          ENVIRONMENT: ${{ matrix.environment }}
         run: |
-          SSM_PREFIX="${{ vars.SSM_PREFIX }}"
-          MGMT_LABEL="${{ vars.MGMT_CLUSTER }}"
-          WORKER_LABEL="${{ vars.WORKER_CLUSTER }}"
+          case "${ENVIRONMENT}" in
+            dev|prod) ;;
+            *)
+              echo "::error::Unsupported environment: ${ENVIRONMENT}"
+              exit 1
+              ;;
+          esac
+
+          # 與 Terraform root 共用受版控的 environment 設定
+          CONFIG_FILE="terraform/argocd/environments/${ENVIRONMENT}.json"
+          SSM_PREFIX="$(jq -er '.ssm_path_prefix' "${CONFIG_FILE}")"
+          MGMT_LABEL="$(jq -er '.mgmt_cluster_label' "${CONFIG_FILE}")"
+          WORKER_LABEL="$(jq -er '.worker_cluster_label' "${CONFIG_FILE}")"
 
           echo "MGMT_LABEL=${MGMT_LABEL}" >> "${GITHUB_ENV}"
           echo "WORKER_LABEL=${WORKER_LABEL}" >> "${GITHUB_ENV}"
