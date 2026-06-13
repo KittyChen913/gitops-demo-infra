@@ -53,6 +53,12 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@v6
 
+      - name: "Load environment configuration"
+        id: environment-config
+        uses: ./.github/actions/load-environment-config
+        with:
+          environment: ${{ inputs.environment }}
+
       # ── AWS OIDC 認證 ─────────────────────────────────────────────────────
       - name: "Configure AWS Credentials (OIDC)"
         uses: ./.github/actions/configure-aws-credentials
@@ -68,27 +74,10 @@ jobs:
       # ── 從 SSM 取得叢集憑證，建立 kubeconfig ─────────────────────────────
       # 憑證不寫入 GITHUB_WORKSPACE，使用 mktemp 並 chmod 600
       - name: "Fetch cluster credentials from SSM"
-        id: fetch-creds
         env:
-          ENVIRONMENT: ${{ inputs.environment }}
+          MGMT_LABEL: ${{ steps.environment-config.outputs.mgmt_cluster_label }}
+          SSM_PREFIX: ${{ steps.environment-config.outputs.ssm_path_prefix }}
         run: |
-          case "${ENVIRONMENT}" in
-            dev|prod) ;;
-            *)
-              echo "::error::Unsupported environment: ${ENVIRONMENT}"
-              exit 1
-              ;;
-          esac
-
-          # 與 Terraform root 共用受版控的 environment 設定
-          CONFIG_FILE="terraform/argocd/environments/${ENVIRONMENT}.json"
-          SSM_PREFIX="$(jq -er '.ssm_path_prefix' "${CONFIG_FILE}")"
-          MGMT_LABEL="$(jq -er '.mgmt_cluster_label' "${CONFIG_FILE}")"
-          WORKER_LABEL="$(jq -er '.worker_cluster_label' "${CONFIG_FILE}")"
-
-          echo "mgmt_label=${MGMT_LABEL}" >> "${GITHUB_OUTPUT}"
-          echo "worker_label=${WORKER_LABEL}" >> "${GITHUB_OUTPUT}"
-
           echo "Fetching credentials for management cluster: ${MGMT_LABEL}"
 
           API_ENDPOINT="$(aws ssm get-parameter \
@@ -134,8 +123,6 @@ jobs:
 
           echo "KUBECONFIG=${KUBECONFIG_FILE}" >> "${GITHUB_ENV}"
           echo "KUBECONFIG_FILE=${KUBECONFIG_FILE}" >> "${GITHUB_ENV}"
-          echo "API_ENDPOINT=${API_ENDPOINT}" >> "${GITHUB_OUTPUT}"
-          echo "WORKER_LABEL=${WORKER_LABEL}" >> "${GITHUB_OUTPUT}"
 
       # ── 1. Kubernetes API 連通性 ──────────────────────────────────────────
       - name: "1 — Kubernetes API connectivity"
@@ -253,24 +240,15 @@ jobs:
       - name: "5 — Root Application bootstrap"
         id: root-app
         env:
-          ENVIRONMENT: ${{ inputs.environment }}
+          ROOT_APPLICATIONS: ${{ steps.environment-config.outputs.root_applications }}
         run: |
           echo "=== Root Application Bootstrap Check ==="
-          case "${ENVIRONMENT}" in
-            dev|prod) ;;
-            *)
-              echo "::error::Unsupported environment: ${ENVIRONMENT}"
-              exit 1
-              ;;
-          esac
-
-          CONFIG_FILE="terraform/argocd/environments/${ENVIRONMENT}.json"
           mapfile -t ROOT_APPS < <(
-            jq -er '.root_applications | to_entries[] | .value.name' "${CONFIG_FILE}"
+            jq -er 'to_entries[] | .value.name' <<< "${ROOT_APPLICATIONS}"
           )
 
           if [ "${#ROOT_APPS[@]}" -eq 0 ]; then
-            echo "::error::No Root Applications configured in ${CONFIG_FILE}"
+            echo "::error::No Root Applications configured"
             exit 1
           fi
 
@@ -322,7 +300,7 @@ jobs:
       - name: "6 — Worker cluster registration"
         id: cluster-reg
         env:
-          WORKER_LABEL: ${{ steps.fetch-creds.outputs.worker_label }}
+          WORKER_LABEL: ${{ steps.environment-config.outputs.worker_cluster_label }}
         run: |
           echo "=== ArgoCD Cluster Registration Check ==="
           EXPECTED_SECRET="cluster-${WORKER_LABEL}"

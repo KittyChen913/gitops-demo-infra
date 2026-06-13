@@ -87,6 +87,12 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@v6
 
+      - name: "Load environment configuration"
+        id: environment-config
+        uses: ./.github/actions/load-environment-config
+        with:
+          environment: ${{ matrix.environment }}
+
       # ── AWS OIDC 認證 ─────────────────────────────────────────────────────
       - name: "Configure AWS Credentials (OIDC)"
         uses: ./.github/actions/configure-aws-credentials
@@ -101,24 +107,11 @@ jobs:
 
       # ── 從 SSM 取得叢集憑證 ───────────────────────────────────────────────
       - name: "Fetch cluster credentials from SSM"
-        id: fetch-creds
         env:
-          ENVIRONMENT: ${{ matrix.environment }}
+          MGMT_LABEL: ${{ steps.environment-config.outputs.mgmt_cluster_label }}
+          SSM_PREFIX: ${{ steps.environment-config.outputs.ssm_path_prefix }}
+          WORKER_LABEL: ${{ steps.environment-config.outputs.worker_cluster_label }}
         run: |
-          case "${ENVIRONMENT}" in
-            dev|prod) ;;
-            *)
-              echo "::error::Unsupported environment: ${ENVIRONMENT}"
-              exit 1
-              ;;
-          esac
-
-          # 與 Terraform root 共用受版控的 environment 設定
-          CONFIG_FILE="terraform/argocd/environments/${ENVIRONMENT}.json"
-          SSM_PREFIX="$(jq -er '.ssm_path_prefix' "${CONFIG_FILE}")"
-          MGMT_LABEL="$(jq -er '.mgmt_cluster_label' "${CONFIG_FILE}")"
-          WORKER_LABEL="$(jq -er '.worker_cluster_label' "${CONFIG_FILE}")"
-
           echo "MGMT_LABEL=${MGMT_LABEL}" >> "${GITHUB_ENV}"
           echo "WORKER_LABEL=${WORKER_LABEL}" >> "${GITHUB_ENV}"
 
