@@ -11,8 +11,9 @@
 
 ## 目錄結構
 
-- `terraform/argocd/dev/`：dev 環境的正式 Terraform root，包含靜態 backend 與環境設定。
-- `terraform/argocd/prod/`：prod 環境的正式 Terraform root，包含靜態 backend 與環境設定。
+- `terraform/argocd/dev/`：dev 環境的正式 Terraform root，包含靜態 backend，並讀取 dev environment config。
+- `terraform/argocd/prod/`：prod 環境的正式 Terraform root，包含靜態 backend，並讀取 prod environment config。
+- `terraform/argocd/environments/`：dev 與 prod 各自的共用 environment config，供 Terraform 與 GitHub Actions 讀取。
 - `terraform/modules/argocd/`：dev 與 prod 共用的 Argo CD Terraform module。
 - `terraform/environments/bootstrap/`：保留 S3 state bucket 的 local-backend Terraform 定義；apply workflow 不執行此 root，也不負責建立 bucket。
 - `argocd/install/`：安裝 Argo CD 的 Kustomize manifest。
@@ -32,7 +33,10 @@
 ## Terraform 規則
 
 - 不得在 provider block 中寫死 AWS region，必須使用 `var.aws_region`。
-- 不得將 AWS region 儲存為 GitHub variable。Workflow 可直接傳入固定的 OIDC region `ap-southeast-1`。
+- 不得將 AWS region 儲存為 GitHub variable。Workflow 應沿用 `.github/actions/configure-aws-credentials` 的預設 OIDC region `ap-southeast-1`。
+- SSM path prefix、management/worker cluster labels 與 Root Application metadata 必須定義於 `terraform/argocd/environments/<environment>.json`，不得在 Terraform root 或 workflow 重複寫死。
+- dev 與 prod 必須使用獨立的 environment config；修改 prod 設定不得觸發 dev apply。
+- Root Application 設定的 `name` 必須與對應 manifest 的 `metadata.name` 一致。
 - `terraform/argocd/<environment>/backend.tf` 必須包含完整靜態 S3 backend 設定：`bucket`、`region`、`key`、`encrypt` 與 `use_lockfile`。
 - dev 與 prod state key 必須分別為 `gitops-demo-infra/dev/argocd/terraform.tfstate` 與 `gitops-demo-infra/prod/argocd/terraform.tfstate`。
 - 非 bootstrap 的 Terraform init 必須直接在 `terraform/argocd/dev` 或 `terraform/argocd/prod` 執行，不得使用 `-backend-config` 動態注入 backend 值。
@@ -49,6 +53,7 @@
 - 需要 AWS 的 job 必須包含 `permissions: id-token: write` 與 `contents: read`。
 - 只有 job 透過 `uses: ./.github/workflows/...` 呼叫 reusable workflow 時才需要 `secrets: inherit`；composite action 不使用此設定。
 - 修改 composite action 時，必須透過 `.github/actions/**` 將變更納入相關 workflow 的 `paths` filter。
+- Workflow 需要讀取 Argo CD environment config 時，必須使用 `.github/actions/load-environment-config`，不得自行組合 config 路徑或重複以 `jq` 解析欄位。
 - 使用目前的 action major tag：`actions/checkout@v6`、`hashicorp/setup-terraform@v4`、`actions/upload-artifact@v7`、`azure/setup-kubectl@v5` 與 `aws-actions/configure-aws-credentials@v6`。
 
 ## Workflow 職責
