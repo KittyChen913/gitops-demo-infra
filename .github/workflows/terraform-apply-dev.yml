@@ -35,6 +35,7 @@ on:
     # 僅 dev root、bootstrap、共用 module、Argo CD manifest 與此 pipeline
     # 的直接依賴變更才觸發。Prod-only、文件與一般 workflow 變更不部署 dev。
     paths:
+      - "terraform/argocd/environments/dev.json"
       - "terraform/argocd/dev/**"
       - "terraform/environments/bootstrap/**"
       - "terraform/modules/argocd/**"
@@ -43,6 +44,7 @@ on:
       - ".github/workflows/workflow-quality.yml"
       - ".github/workflows/_bootstrap-backend.yml"
       - ".github/workflows/_terraform-apply-stage.yml"
+      - ".github/workflows/argo-bootstrap-verify.yml"
       - ".github/actions/**"
 
   workflow_dispatch:
