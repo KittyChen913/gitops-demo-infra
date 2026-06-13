@@ -26,10 +26,13 @@ variable "argocd_namespace" {
   default     = "argocd"
 }
 
-variable "root_app_teams" {
-  description = "各 team 的 Root Application YAML 路徑 map（相對於 argocd/bootstrap/），key 為 team 名稱"
-  type        = map(string)
-  default     = {}
+variable "root_applications" {
+  description = "各 team 的 Root Application metadata，manifest 路徑相對於 argocd/bootstrap/"
+  type = map(object({
+    name     = string
+    manifest = string
+  }))
+  default = {}
 }
 
 

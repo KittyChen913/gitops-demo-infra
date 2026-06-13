@@ -145,13 +145,24 @@ resource "kustomization_resource" "argocd_self_app" {
 # 須在 argocd_self_app 之後執行，確保 ArgoCD CRD 已就緒。
 # Application 納入 Terraform state，因此刪除或 drift 會在 plan 中被偵測。
 resource "kustomization_resource" "argocd_root_app" {
-  for_each = var.root_app_teams
+  for_each = var.root_applications
 
   manifest = jsonencode(yamldecode(
-    file("${local.manifest_root}/bootstrap/${each.value}")
+    file("${local.manifest_root}/bootstrap/${each.value.manifest}")
   ))
   depends_on = [
     kubernetes_secret_v1.argocd_worker_cluster,
     kustomization_resource.argocd_self_app,
   ]
+
+  lifecycle {
+    precondition {
+      condition = (
+        yamldecode(
+          file("${local.manifest_root}/bootstrap/${each.value.manifest}")
+        ).metadata.name == each.value.name
+      )
+      error_message = "Root Application 設定名稱必須與 manifest metadata.name 相同。"
+    }
+  }
 }

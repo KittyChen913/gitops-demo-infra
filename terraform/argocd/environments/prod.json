@@ -1,0 +1,11 @@
+{
+  "ssm_path_prefix": "/gitops/prod/clusters",
+  "mgmt_cluster_label": "lke-prod-mgmt",
+  "worker_cluster_label": "lke-prod-ateam",
+  "root_applications": {
+    "ateam": {
+      "name": "root-application-prod",
+      "manifest": "ateam/root-application-prod.yaml"
+    }
+  }
+}

@@ -1,12 +1,13 @@
+locals {
+  environment_config = jsondecode(file("${path.module}/../environments/dev.json"))
+}
+
 module "argocd" {
   source = "../../modules/argocd"
 
-  aws_region           = "ap-southeast-1"
-  ssm_path_prefix      = "/gitops/dev/clusters"
-  mgmt_cluster_label   = "lke-dev-mgmt"
-  worker_cluster_label = "lke-dev-ateam"
+  ssm_path_prefix      = local.environment_config.ssm_path_prefix
+  mgmt_cluster_label   = local.environment_config.mgmt_cluster_label
+  worker_cluster_label = local.environment_config.worker_cluster_label
   argocd_namespace     = "argocd"
-  root_app_teams = {
-    ateam = "ateam/root-application-dev.yaml"
-  }
+  root_applications    = local.environment_config.root_applications
 }
